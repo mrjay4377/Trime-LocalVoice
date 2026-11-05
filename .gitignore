@@ -1,0 +1,12 @@
+# 构建产物、缓存与本机工具链不上传（可从源码与官方仓库重建）
+.gradle/
+.gradle-home/
+build/
+.cxx/
+local.properties
+*.log
+*.part
+*.part.backup
+*.bak
+.DS_Store
+Thumbs.db
