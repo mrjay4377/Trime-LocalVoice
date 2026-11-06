@@ -606,6 +606,15 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         InputFeedbackManager.finishInput()
     }
 
+    /**
+     * 当前 Rime 是否处于繁体输出状态，供本地语音「跟随输入法简/繁」档位读取。
+     * Rime 尚未启动或状态读取失败时按简体处理，避免语音上屏被异常打断。
+     */
+    val isTraditionalMode: Boolean
+        get() = runCatching {
+            if (::rime.isInitialized) rime.run { statusCached.isTraditional } else false
+        }.getOrDefault(false)
+
     fun commitText(text: String) {
         val ic = currentInputConnection ?: return
 

@@ -73,6 +73,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     private var keepAlivePreference: ListPreference? = null
     private var sourcePreference: Preference? = null
     private var itnPreference: SwitchPreferenceCompat? = null
+    private var conversionPreference: ListPreference? = null
     private var modelsPreference: Preference? = null
     private var deletePreference: Preference? = null
     private var installJob: Job? = null
@@ -287,6 +288,22 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     itnPreference = this
                     setOnPreferenceChangeListener { _, newValue ->
                         LocalVoiceSettings.setItn(ctx, LocalVoiceSettings.vendor(ctx), newValue as Boolean)
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                ListPreference(ctx).apply {
+                    key = KEY_OUTPUT_CONVERSION
+                    title = "输出字形"
+                    entries = CONVERSION_LABELS
+                    entryValues = CONVERSION_VALUES
+                    isIconSpaceReserved = false
+                    conversionPreference = this
+                    setOnPreferenceChangeListener { _, newValue ->
+                        LocalVoiceSettings.setOutputConversion(ctx, newValue as String)
+                        refresh(ctx)
                         true
                     }
                 },
@@ -936,6 +953,12 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         // ITN 只在引擎真正读取该字段的家族里显示。
         itnPreference?.isVisible = family in ITN_FAMILIES
         itnPreference?.isChecked = LocalVoiceSettings.isItn(ctx, family)
+        val conversion = LocalVoiceSettings.outputConversion(ctx)
+        conversionPreference?.apply {
+            value = conversion
+            val label = CONVERSION_SHORT[CONVERSION_VALUES.indexOf(conversion).coerceAtLeast(0)]
+            summary = "当前：$label\n仅影响语音上屏文字，打字不受影响"
+        }
         val keepAlive = LocalVoiceSettings.keepAliveMinutes(ctx, family).toString()
         keepAlivePreference?.apply {
             val v = if (keepAlive in KEEP_ALIVE_VALUES) keepAlive else "-1"
@@ -1043,6 +1066,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         const val KEY_THREADS = "lv_threads"
         const val KEY_LANGUAGE = "lv_language"
         const val KEY_ITN = "lv_itn"
+        const val KEY_OUTPUT_CONVERSION = "lv_output_conversion"
         const val KEY_KEEP_ALIVE = "lv_keep_alive"
         const val KEY_SAVE_RECORDING = "lv_save_recording"
         const val KEY_USAGE = "lv_usage"
@@ -1061,6 +1085,22 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         val LANGUAGE_FAMILIES = setOf("sensevoice", "funasr_nano")
         /** 引擎里真正读取 ITN 的家族；其余家族隐藏该开关，避免给出无效选项。 */
         val ITN_FAMILIES = LANGUAGE_FAMILIES
+        /** 语音结果的字形转换；顺序与 ChineseConverter.MODE_* 一致。 */
+        val CONVERSION_VALUES = arrayOf("off", "s2t", "s2tw", "t2s", "auto")
+        val CONVERSION_LABELS = arrayOf(
+            "不转换 · 原样输出",
+            "简体 → 繁体（标准） · 语音→語音",
+            "简体 → 繁体（台湾正体） · 里→裡",
+            "繁体 → 简体 · 語音→语音",
+            "跟随输入法简/繁开关",
+        )
+        val CONVERSION_SHORT = arrayOf(
+            "不转换（原样输出）",
+            "简体 → 繁体（标准）",
+            "简体 → 繁体（台湾正体）",
+            "繁体 → 简体",
+            "跟随输入法简/繁开关",
+        )
         val KEEP_ALIVE_VALUES = arrayOf("-1", "0", "5", "15", "30")
         val KEEP_ALIVE_LABELS = arrayOf(
             "常驻内存（最快）",

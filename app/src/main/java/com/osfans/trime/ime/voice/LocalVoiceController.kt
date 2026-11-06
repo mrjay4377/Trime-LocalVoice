@@ -93,6 +93,11 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
             notice("请先授予麦克风权限（设置 → 本地语音识别）")
             return false
         }
+        // 开启字形转换时先在后台预热映射表，避免首次上屏才读 assets 造成卡顿；
+        // 默认「不转换」连表都不会加载。
+        if (ChineseConverter.needsTable(LocalVoiceSettings.outputConversion(service))) {
+            scope.launch { ChineseConverter.warmUp(service) }
+        }
         val familyId = LocalVoiceSettings.vendor(service)
         val status = VoiceModels.status(service, familyId)
         val model = status.resolved ?: run {
@@ -116,9 +121,17 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
                             }
                         notice(hint)
                     } else {
-                        Timber.i("LocalVoice commit %d chars (%.1fs audio)", text.length, session.seconds)
+                        // 上屏前按设置做离线简繁转换；转换失败时 ChineseConverter 原样返回。
+                        val mode = LocalVoiceSettings.outputConversion(service)
+                        val output = ChineseConverter.convert(
+                            service, text, mode, service.isTraditionalMode,
+                        )
+                        Timber.i(
+                            "LocalVoice commit %d -> %d chars, mode=%s (%.1fs audio)",
+                            text.length, output.length, mode, session.seconds,
+                        )
                         dismissNotice()
-                        runCatching { service.commitText(text) }
+                        runCatching { service.commitText(output) }
                             .onFailure { Timber.w(it, "LocalVoice commitText failed") }
                     }
                     cleanup(session)

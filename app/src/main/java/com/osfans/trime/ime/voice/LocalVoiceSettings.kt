@@ -91,4 +91,21 @@ object LocalVoiceSettings {
 
     fun setSaveRecording(context: Context, value: Boolean) =
         prefs(context).edit().putBoolean("save_recording", value).apply()
+
+    /**
+     * 语音结果上屏前的字形转换（全局，不随引擎家族变化）：
+     * off / s2t / s2tw / t2s / auto（跟随 Rime 简繁开关）。默认不转换。
+     * 与识别引擎无关，切换时不需要卸载已常驻的模型。
+     */
+    fun outputConversion(context: Context): String {
+        val saved = prefs(context).getString("output_conversion", "off") ?: "off"
+        return if (saved in OUTPUT_CONVERSIONS) saved else "off"
+    }
+
+    fun setOutputConversion(context: Context, value: String) =
+        prefs(context).edit()
+            .putString("output_conversion", if (value in OUTPUT_CONVERSIONS) value else "off")
+            .apply()
+
+    private val OUTPUT_CONVERSIONS = setOf("off", "s2t", "s2tw", "t2s", "auto")
 }
