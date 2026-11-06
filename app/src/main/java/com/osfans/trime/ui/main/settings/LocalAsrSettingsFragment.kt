@@ -40,6 +40,7 @@ import androidx.preference.PreferenceCategory
 import androidx.preference.SwitchPreferenceCompat
 import com.osfans.trime.R
 import com.osfans.trime.ime.voice.AudioRecorder
+import com.osfans.trime.ime.voice.InstalledModel
 import com.osfans.trime.ime.voice.LocalVoiceSettings
 import com.osfans.trime.ime.voice.ModelCatalog
 import com.osfans.trime.ime.voice.ModelInstaller
@@ -73,6 +74,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     private var sourcePreference: Preference? = null
     private var itnPreference: SwitchPreferenceCompat? = null
     private var modelsPreference: Preference? = null
+    private var deletePreference: Preference? = null
     private var installJob: Job? = null
     private var progressDialog: AlertDialog? = null
 
@@ -177,7 +179,9 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     modelsPreference = this
                     setOnPreferenceClickListener {
                         // 咩版的「下载并自动安装模型」主按钮：没装任何模型时本项就是它。
-                        val hasAny = ModelCatalog.VARIANTS.any { ModelInstaller.isInstalled(ctx, it) }
+                        // 手动放置 / ZIP 导入的模型也算「已安装」，否则用户会找不到自己的模型。
+                        val hasAny = ModelInstaller.installedModels(ctx).isNotEmpty() ||
+                            ModelCatalog.VARIANTS.any { ModelInstaller.isInstalled(ctx, it) }
                         if (!hasAny) {
                             ModelCatalog.VARIANTS.minByOrNull { it.downloadMiB }
                                 ?.let { confirmDownload(ctx, it) { refresh(ctx) } }
@@ -199,6 +203,20 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     setOnPreferenceClickListener {
                         // 部分文件管理器给 zip 的 MIME 是 octet-stream，用 */* 保证能选到。
                         openZipLauncher.launch(arrayOf("*/*"))
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                Preference(ctx).apply {
+                    key = KEY_DELETE_MODELS
+                    title = "删除已安装模型"
+                    isIconSpaceReserved = false
+                    isSelectable = true
+                    deletePreference = this
+                    setOnPreferenceClickListener {
+                        showDeleteModels(ctx)
                         true
                     }
                 },
@@ -425,6 +443,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 dialog.dismiss()
                 onEngineSelected(ctx, row.value)
             }
+            .setNeutralButton("删除模型") { _, _ -> showDeleteModels(ctx) }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
@@ -453,6 +472,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     confirmDownload(ctx, variant) { refresh(ctx) }
                 }
             }
+            .setNeutralButton("删除模型") { _, _ -> showDeleteModels(ctx) }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
@@ -563,18 +583,94 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     0 -> {
                         LocalVoiceSettings.setVendor(ctx, variant.familyId)
                         LocalVoiceSettings.setSelectedVariant(ctx, variant.familyId, variant.key)
+                        refresh(ctx)
                     }
                     1 -> copyPath(ctx, path)
-                    else -> {
-                        ModelInstaller.uninstall(ctx, variant)
-                        toast(ctx, getString(R.string.local_asr_model_deleted))
-                    }
+                    else -> confirmDeleteVariant(ctx, variant)
                 }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** 单个规格模型的删除确认，避免误点就删掉几百 MB。 */
+    private fun confirmDeleteVariant(ctx: Context, variant: ModelVariant) {
+        AlertDialog.Builder(ctx)
+            .setTitle(getString(R.string.local_asr_model_delete))
+            .setMessage(
+                "确定删除 ${variant.displayName} 的模型文件吗？\n" +
+                    "目录：${displayPath(ctx, ModelInstaller.installedDir(ctx, variant).absolutePath)}\n" +
+                    "删除后需重新下载才能使用，此操作不可恢复。",
+            ).setPositiveButton("删除") { _, _ ->
+                val ok = ModelInstaller.uninstall(ctx, variant)
+                toast(
+                    ctx,
+                    if (ok) getString(R.string.local_asr_model_deleted) else "删除失败，请检查 voice 目录权限",
+                )
+                refresh(ctx)
+            }.setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * 统一管理入口：列出 voice 目录里所有真实存在的模型（含 ZIP 导入、手动放置、
+     * 安装失败残留），支持多选删除；另外可单独清理未完成的下载缓存。
+     */
+    private fun showDeleteModels(ctx: Context) {
+        val models = ModelInstaller.installedModels(ctx)
+        val cacheBytes = ModelInstaller.downloadCacheSize(ctx)
+        if (models.isEmpty() && cacheBytes <= 0L) {
+            toast(ctx, "没有可删除的模型或下载缓存")
+            return
+        }
+        val labels = models.map { "${it.label} · ${formatMiB(it.sizeBytes)}" }.toTypedArray()
+        val checked = BooleanArray(models.size)
+        AlertDialog.Builder(ctx)
+            .setTitle("删除已安装模型")
+            .setMultiChoiceItems(labels, checked) { _, which, isChecked -> checked[which] = isChecked }
+            .setPositiveButton("删除所选") { _, _ ->
+                val selected = models.filterIndexed { index, _ -> checked[index] }
+                if (selected.isEmpty()) {
+                    toast(ctx, "未勾选任何模型")
+                } else {
+                    confirmDelete(ctx, selected)
+                }
+            }
+            .setNeutralButton("清理缓存（${formatMiB(cacheBytes)}）") { _, _ ->
+                val freed = ModelInstaller.clearDownloadCache(ctx)
+                toast(ctx, if (freed > 0L) "已清理下载缓存 ${formatMiB(freed)}" else "下载缓存为空")
                 refresh(ctx)
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
+
+    private fun confirmDelete(ctx: Context, models: List<InstalledModel>) {
+        val total = models.sumOf { it.sizeBytes }
+        val message = buildString {
+            appendLine("将永久删除以下模型（不可恢复）：")
+            models.forEach { appendLine("· ${it.label} · ${formatMiB(it.sizeBytes)}") }
+            appendLine()
+            append("共 ${models.size} 套，约 ${formatMiB(total)}。删除后需重新下载或导入。")
+        }
+        AlertDialog.Builder(ctx)
+            .setTitle("确认删除模型")
+            .setMessage(message)
+            .setPositiveButton("删除") { _, _ -> performDelete(ctx, models) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun performDelete(ctx: Context, models: List<InstalledModel>) {
+        val app = ctx.applicationContext
+        viewLifecycleOwner.lifecycleScope.launch {
+            val freed = withContext(Dispatchers.IO) { ModelInstaller.deleteModels(app, models) }
+            toast(ctx, "已删除 ${models.size} 套模型，释放 ${formatMiB(freed)}")
+            context?.let(::refresh)
+        }
+    }
+
+    private fun formatMiB(bytes: Long): String = "%.1f MiB".format(bytes / 1048576.0)
 
     /** 切换下载源；手动下载 / 复制地址收进本弹窗，避免顶层再挂一个重复入口。 */
     private fun showSourceDialog(ctx: Context) {
@@ -851,16 +947,21 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         sourcePreference?.summary = "当前：${ModelCatalog.SOURCES[source]}\n点击切换下载源或复制模型地址"
 
         // 没有模型时，这一项变成咩版那种显眼的「下载并自动安装」主操作。
-        val installedCount = ModelCatalog.VARIANTS.count { ModelInstaller.isInstalled(ctx, it) }
+        val present = ModelInstaller.installedModels(ctx)
         modelsPreference?.apply {
-            if (installedCount == 0) {
+            if (present.isEmpty()) {
                 val rec = ModelCatalog.VARIANTS.minByOrNull { it.downloadMiB }
                 title = "下载并安装模型"
                 summary = "推荐 ${rec?.displayName ?: "最小模型"} · 约 ${rec?.downloadMiB ?: 0} MiB · 点击一键安装"
             } else {
                 title = getString(R.string.local_asr_models)
-                summary = "已安装 $installedCount / ${ModelCatalog.VARIANTS.size} · 点击查看 / 下载 / 切换"
+                summary = "已安装 ${present.size} 套 · 可下载 ${ModelCatalog.VARIANTS.size} 种 · 点击查看 / 下载 / 切换"
             }
+        }
+        deletePreference?.summary = if (present.isEmpty()) {
+            "暂无已安装的模型 · 可清理下载缓存"
+        } else {
+            "已安装 ${present.size} 套 · 占用 ${formatMiB(present.sumOf { it.sizeBytes })} · 点击选择并删除"
         }
     }
 
@@ -936,6 +1037,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         const val KEY_CATEGORY_MODELS = "lv_category_models"
         const val KEY_MODELS = "lv_models"
         const val KEY_IMPORT_ZIP = "lv_import_zip"
+        const val KEY_DELETE_MODELS = "lv_delete_models"
         const val KEY_SOURCE = "lv_source"
         const val KEY_CATEGORY_RECOG = "lv_category_recog"
         const val KEY_THREADS = "lv_threads"

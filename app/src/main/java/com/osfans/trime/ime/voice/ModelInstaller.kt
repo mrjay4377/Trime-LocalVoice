@@ -20,10 +20,20 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.util.Locale
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
 
 class ModelIntegrityException(message: String) : IOException(message)
+
+/** voice 目录里真实存在的一套模型，供「删除已安装模型」统一管理。 */
+data class InstalledModel(
+    val dir: File,
+    val label: String,
+    val sizeBytes: Long,
+    /** true = 模型平铺在 voice 根目录；删除时只删模型文件，保留 README / .nomedia / installed.txt。 */
+    val flatRoot: Boolean,
+)
 
 object ModelInstaller {
     const val PHASE_DOWNLOAD = "下载模型"
@@ -49,11 +59,113 @@ object ModelInstaller {
 
     fun uninstall(context: Context, variant: ModelVariant): Boolean {
         val dir = installedDir(context, variant)
-        val selected = LocalVoiceSettings.selectedVariant(context, variant.familyId)
-        if (selected == variant.key) LocalVoiceSettings.setSelectedVariant(context, variant.familyId, "")
+        if (LocalVoiceSettings.selectedVariant(context, variant.familyId) == variant.key) {
+            LocalVoiceSettings.setSelectedVariant(context, variant.familyId, "")
+        }
         val result = runCatching { !dir.exists() || dir.deleteRecursively() }.getOrDefault(false)
+        // 模型可能正被常驻识别器占用，删除后立即卸载缓存，避免继续持有旧文件句柄。
+        runCatching { SherpaOfflineManager.getInstance().unload() }
         writeInstalledIndex(context)
         return result
+    }
+
+    /**
+     * 扫描 voice 目录里所有真实存在的模型：下载安装的规格目录、ZIP 导入的 import_* 目录、
+     * 手动平铺/解压的目录，以及安装失败留下的 .xxx.installing / .xxx.previous 残留。
+     * 只有目录内含受支持家族的模型文件才算一套模型，避免把普通文件夹列进来。
+     */
+    fun installedModels(context: Context): List<InstalledModel> {
+        val root = VoiceModels.primaryRoot(context)
+        if (!root.isDirectory) return emptyList()
+        val result = mutableListOf<InstalledModel>()
+
+        val flatFiles = root.listFiles()?.filter(::isModelFile).orEmpty()
+        if (flatFiles.isNotEmpty()) {
+            result += InstalledModel(
+                dir = root,
+                label = "根目录（手动平铺）",
+                sizeBytes = flatFiles.sumOf { it.length() },
+                flatRoot = true,
+            )
+        }
+
+        fun scan(parent: File, depth: Int) {
+            if (depth > 2) return
+            parent.listFiles()?.forEach { dir ->
+                if (!dir.isDirectory || dir.name == "__MACOSX") return@forEach
+                val hasModel = dir.listFiles()?.any(::isModelFile) == true
+                if (hasModel) {
+                    val label = when {
+                        dir.name.startsWith(".") -> "${dir.name}（安装残留）"
+                        depth == 0 -> dir.name
+                        else -> "${parent.name}/${dir.name}"
+                    }
+                    result += InstalledModel(dir, label, dirSize(dir), flatRoot = false)
+                    // 已作为一整套列出，不再把内部子目录重复列一遍
+                } else {
+                    scan(dir, depth + 1)
+                }
+            }
+        }
+        scan(root, 0)
+        return result.distinctBy { it.dir.absolutePath }.sortedBy { it.label }
+    }
+
+    /** 删除选中的模型目录，返回实际释放的字节数；同时重置选中项并卸载识别器缓存。 */
+    fun deleteModels(context: Context, models: List<InstalledModel>): Long {
+        val app = context.applicationContext
+        var freed = 0L
+        models.forEach { model ->
+            val dir = model.dir
+            if (!dir.exists()) return@forEach
+            val files = dir.listFiles()?.filter(::isModelFile).orEmpty()
+            val before = if (model.flatRoot) files.sumOf { it.length() } else dirSize(dir)
+            val ok = if (model.flatRoot) {
+                files.all { file -> runCatching { file.delete() }.getOrDefault(false) }
+            } else {
+                runCatching { dir.deleteRecursively() }.getOrDefault(false)
+            }
+            if (ok) freed += before
+        }
+        // 选中项指向已被删掉的目录时清空，避免设置页仍显示「已就绪」而引擎找不到文件。
+        VoiceModels.FAMILIES.forEach { family ->
+            val selected = LocalVoiceSettings.selectedVariant(app, family.id)
+            if (selected.isNotBlank() &&
+                !File(File(VoiceModels.primaryRoot(app), family.id), selected).exists()
+            ) {
+                LocalVoiceSettings.setSelectedVariant(app, family.id, "")
+            }
+        }
+        runCatching { SherpaOfflineManager.getInstance().unload() }
+        writeInstalledIndex(app)
+        return freed
+    }
+
+    /** 下载缓存（未完成的 zip、解压临时目录）占用空间，可单独清理。 */
+    fun downloadCacheSize(context: Context): Long = runCatching {
+        val dir = cacheRoot(context)
+        if (dir.isDirectory) dirSize(dir) else 0L
+    }.getOrDefault(0L)
+
+    fun clearDownloadCache(context: Context): Long {
+        val size = downloadCacheSize(context)
+        runCatching { cacheRoot(context).deleteRecursively() }
+        return size
+    }
+
+    private val modelFileNames: Set<String> by lazy {
+        VoiceModels.FAMILIES.flatMap { it.groups.flatten() }
+            .map { it.lowercase(Locale.ROOT) }
+            .toSet()
+    }
+
+    private fun isModelFile(file: File): Boolean =
+        file.isFile && file.name.lowercase(Locale.ROOT) in modelFileNames
+
+    private fun dirSize(dir: File): Long {
+        var total = 0L
+        dir.walkTopDown().forEach { if (it.isFile) total += it.length() }
+        return total
     }
 
     /**

@@ -296,10 +296,26 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
                         } else {
                             showWebDavFailures(ctx, result.failed)
                         }
-                    }.onFailure { ctx.toast("WebDAV 同步失败：${it.message}") }
+                    }.onFailure { showWebDavError(ctx, it) }
                 updateWebDavUi()
             }
         }
+    }
+
+    /** 失败原因往往很长（含 HTTP 状态码与排查提示），Toast 会被截断，改用弹窗完整展示。 */
+    private fun showWebDavError(ctx: Context, error: Throwable) {
+        val reason = error.message ?: error.javaClass.simpleName
+        AlertDialog
+            .Builder(ctx)
+            .setTitle("WebDAV 同步失败")
+            .setMessage(
+                "$reason\n\n排查建议：\n" +
+                    "· 坚果云地址为 https://dav.jianguoyun.com/dav\n" +
+                    "· 账号用邮箱，密码用网页端生成的「应用密码」，不是登录密码\n" +
+                    "· 远端目录可先留空或填 trime，确认能同步后再改\n" +
+                    "· 若提示 401/403，检查账号、应用密码与该目录权限",
+            ).setPositiveButton(android.R.string.ok, null)
+            .show()
     }
 
     private fun showWebDavFailures(ctx: Context, failures: List<String>) {
@@ -460,7 +476,7 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
                     ctx,
                     key = "webdav_url",
                     title = "服务器地址",
-                    hint = "https://dav.example.com/remote.php/dav/files/alice",
+                    hint = "https://dav.jianguoyun.com/dav（坚果云）",
                     getter = { it.url },
                     setter = { prefs, value -> prefs.url = value },
                 ),
@@ -480,7 +496,7 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
                     ctx,
                     key = "webdav_password",
                     title = "密码 / 应用专用密码",
-                    hint = "建议用应用专用密码",
+                    hint = "坚果云需在网页端生成应用密码，不是登录密码",
                     password = true,
                     getter = { it.password },
                     setter = { prefs, value -> prefs.password = value },
