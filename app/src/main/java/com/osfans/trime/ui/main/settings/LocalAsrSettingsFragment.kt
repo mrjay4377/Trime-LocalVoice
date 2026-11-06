@@ -20,6 +20,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
 import android.text.TextUtils
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -92,18 +93,21 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         ModelInstaller.writeInstalledIndex(ctx)
 
         preferenceScreen = preferenceManager.createPreferenceScreen(ctx).apply {
-            // 模型完整性检测放在第一位，打开设置就能看到当前引擎有没有可用模型。
+            // 参照咩版：先给状态，再分组配置；每项摘要只留当前值，长说明放进点击后的弹窗。
+            addPreference(category(ctx, KEY_CATEGORY_STATUS, "当前状态"))
+
             addPreference(
                 Preference(ctx).apply {
                     key = KEY_STATUS
                     title = getString(R.string.local_asr_model_status)
+                    isIconSpaceReserved = false
                     isSelectable = true
                     modelStatusPreference = this
                     setOnPreferenceClickListener {
                         val status = runCatching { VoiceModels.status(ctx, LocalVoiceSettings.vendor(ctx)) }
                             .getOrNull()
                         if (status?.ready == true) {
-                            copyPath(ctx, VoiceModels.primaryRoot(ctx).absolutePath)
+                            showModelDetail(ctx)
                         } else {
                             // 还没有可用模型时，直接给出一键下载入口，避免只显示路径却无从下手。
                             val recommended = ModelCatalog.VARIANTS.minByOrNull { it.downloadMiB }
@@ -119,34 +123,10 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             )
 
             addPreference(
-                SwitchPreferenceCompat(ctx).apply {
-                    key = KEY_ENABLED
-                    title = getString(R.string.local_asr_enabled)
-                    summary = getString(R.string.local_asr_enabled_summary)
-                    isChecked = LocalVoiceSettings.isEnabled(ctx)
-                    setOnPreferenceChangeListener { _, newValue ->
-                        LocalVoiceSettings.setEnabled(ctx, newValue as Boolean)
-                        true
-                    }
-                },
-            )
-
-            addPreference(
-                Preference(ctx).apply {
-                    key = KEY_VENDOR
-                    title = getString(R.string.local_asr_vendor)
-                    vendorPreference = this
-                    setOnPreferenceClickListener {
-                        showEnginePicker(ctx)
-                        true
-                    }
-                },
-            )
-
-            addPreference(
                 Preference(ctx).apply {
                     key = KEY_PERMISSION
                     title = getString(R.string.local_asr_permission)
+                    isIconSpaceReserved = false
                     isSelectable = true
                     permissionPreference = this
                     setOnPreferenceClickListener {
@@ -159,22 +139,51 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 },
             )
 
+            addPreference(category(ctx, KEY_CATEGORY_BASIC, "基本设置"))
+
             addPreference(
-                PreferenceCategory(ctx).apply {
-                    key = KEY_CATEGORY_MODELS
-                    title = getString(R.string.local_asr_models)
+                SwitchPreferenceCompat(ctx).apply {
+                    key = KEY_ENABLED
+                    title = getString(R.string.local_asr_enabled)
+                    summary = getString(R.string.local_asr_enabled_summary)
                     isIconSpaceReserved = false
+                    isChecked = LocalVoiceSettings.isEnabled(ctx)
+                    setOnPreferenceChangeListener { _, newValue ->
+                        LocalVoiceSettings.setEnabled(ctx, newValue as Boolean)
+                        true
+                    }
                 },
             )
 
             addPreference(
                 Preference(ctx).apply {
+                    key = KEY_VENDOR
+                    title = getString(R.string.local_asr_vendor)
+                    isIconSpaceReserved = false
+                    vendorPreference = this
+                    setOnPreferenceClickListener {
+                        showEnginePicker(ctx)
+                        true
+                    }
+                },
+            )
+
+            addPreference(category(ctx, KEY_CATEGORY_MODELS, "模型"))
+
+            addPreference(
+                Preference(ctx).apply {
                     key = KEY_MODELS
-                    title = getString(R.string.local_asr_models)
-                    summary = getString(R.string.local_asr_models_summary)
+                    isIconSpaceReserved = false
                     modelsPreference = this
                     setOnPreferenceClickListener {
-                        showModelList(ctx)
+                        // 咩版的「下载并自动安装模型」主按钮：没装任何模型时本项就是它。
+                        val hasAny = ModelCatalog.VARIANTS.any { ModelInstaller.isInstalled(ctx, it) }
+                        if (!hasAny) {
+                            ModelCatalog.VARIANTS.minByOrNull { it.downloadMiB }
+                                ?.let { confirmDownload(ctx, it) { refresh(ctx) } }
+                        } else {
+                            showModelList(ctx)
+                        }
                         true
                     }
                 },
@@ -184,7 +193,8 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 Preference(ctx).apply {
                     key = KEY_IMPORT_ZIP
                     title = "从本地导入模型（ZIP）"
-                    summary = "选择已下载好的模型压缩包，自动识别引擎、解压安装并设为当前模型"
+                    summary = "选择已下载的模型包，自动安装并设为当前"
+                    isIconSpaceReserved = false
                     isSelectable = true
                     setOnPreferenceClickListener {
                         // 部分文件管理器给 zip 的 MIME 是 octet-stream，用 */* 保证能选到。
@@ -196,22 +206,9 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
 
             addPreference(
                 Preference(ctx).apply {
-                    key = KEY_MANUAL_DOWNLOAD
-                    title = "手动下载 · 查看 / 复制模型地址"
-                    summary = "用浏览器或电脑下载 ZIP 后，用「从本地导入模型（ZIP）」安装"
-                    isSelectable = true
-                    setOnPreferenceClickListener {
-                        showManualDownload(ctx)
-                        true
-                    }
-                },
-            )
-
-            addPreference(
-                Preference(ctx).apply {
                     key = KEY_SOURCE
                     title = getString(R.string.local_asr_source)
-                    summary = getString(R.string.local_asr_source_summary)
+                    isIconSpaceReserved = false
                     isSelectable = true
                     sourcePreference = this
                     setOnPreferenceClickListener {
@@ -221,29 +218,23 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 },
             )
 
-            addPreference(
-                PreferenceCategory(ctx).apply {
-                    key = KEY_CATEGORY_RECOG
-                    title = "识别选项"
-                    isIconSpaceReserved = false
-                },
-            )
+            addPreference(category(ctx, KEY_CATEGORY_RECOG, "识别选项"))
 
             addPreference(
                 ListPreference(ctx).apply {
                     key = KEY_THREADS
                     title = getString(R.string.local_asr_threads)
-                    summary = getString(R.string.local_asr_threads_summary)
                     entries = THREAD_VALUES
                     entryValues = THREAD_VALUES
+                    isIconSpaceReserved = false
                     threadsPreference = this
-                    setSummaryProvider(ListPreference.SimpleSummaryProvider.getInstance())
                     setOnPreferenceChangeListener { _, newValue ->
                         LocalVoiceSettings.setThreads(
                             ctx,
                             LocalVoiceSettings.vendor(ctx),
                             (newValue as String).toInt(),
                         )
+                        refresh(ctx)
                         true
                     }
                 },
@@ -253,17 +244,17 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 ListPreference(ctx).apply {
                     key = KEY_LANGUAGE
                     title = "识别语言"
-                    summary = "指定音频语种可提升准确率；仅对 SenseVoice、FunASR Nano 生效"
                     entries = LANGUAGE_LABELS
                     entryValues = LANGUAGE_VALUES
+                    isIconSpaceReserved = false
                     languagePreference = this
-                    setSummaryProvider(ListPreference.SimpleSummaryProvider.getInstance())
                     setOnPreferenceChangeListener { _, newValue ->
                         LocalVoiceSettings.setLanguage(
                             ctx,
                             LocalVoiceSettings.vendor(ctx),
                             newValue as String,
                         )
+                        refresh(ctx)
                         true
                     }
                 },
@@ -274,6 +265,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     key = KEY_ITN
                     title = getString(R.string.local_asr_itn)
                     summary = getString(R.string.local_asr_itn_summary)
+                    isIconSpaceReserved = false
                     itnPreference = this
                     setOnPreferenceChangeListener { _, newValue ->
                         LocalVoiceSettings.setItn(ctx, LocalVoiceSettings.vendor(ctx), newValue as Boolean)
@@ -286,17 +278,17 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 ListPreference(ctx).apply {
                     key = KEY_KEEP_ALIVE
                     title = "模型驻留内存"
-                    summary = "控制识别完成后模型是否继续占用内存；改动会立即释放当前已加载的模型"
                     entries = KEEP_ALIVE_LABELS
                     entryValues = KEEP_ALIVE_VALUES
+                    isIconSpaceReserved = false
                     keepAlivePreference = this
-                    setSummaryProvider(ListPreference.SimpleSummaryProvider.getInstance())
                     setOnPreferenceChangeListener { _, newValue ->
                         LocalVoiceSettings.setKeepAliveMinutes(
                             ctx,
                             LocalVoiceSettings.vendor(ctx),
                             (newValue as String).toInt(),
                         )
+                        refresh(ctx)
                         true
                     }
                 },
@@ -307,6 +299,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     key = KEY_SAVE_RECORDING
                     title = getString(R.string.local_asr_save_recording)
                     summary = getString(R.string.local_asr_save_recording_summary)
+                    isIconSpaceReserved = false
                     isChecked = LocalVoiceSettings.isSaveRecording(ctx)
                     setOnPreferenceChangeListener { _, newValue ->
                         LocalVoiceSettings.setSaveRecording(ctx, newValue as Boolean)
@@ -315,12 +308,21 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 },
             )
 
+            // 咩版把用法说明放在页尾小字：这里列表只留一行，完整说明点开看。
             addPreference(
                 Preference(ctx).apply {
                     key = KEY_USAGE
                     title = getString(R.string.local_asr_usage)
-                    summary = getString(R.string.local_asr_usage_summary)
-                    isSelectable = false
+                    summary = "长按空格说话，松手自动上屏 · 点击看完整说明"
+                    isIconSpaceReserved = false
+                    setOnPreferenceClickListener {
+                        AlertDialog.Builder(ctx)
+                            .setTitle(R.string.local_asr_usage)
+                            .setMessage(R.string.local_asr_usage_summary)
+                            .setPositiveButton(android.R.string.ok, null)
+                            .show()
+                        true
+                    }
                 },
             )
         }
@@ -342,8 +344,15 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         if (requestCode == REQUEST_MIC) context?.let(::refresh)
     }
 
+    /** 统一分组样式：不占图标位，标题不与组内第一项重名。 */
+    private fun category(ctx: Context, key: String, title: String) = PreferenceCategory(ctx).apply {
+        this.key = key
+        this.title = title
+        isIconSpaceReserved = false
+    }
+
     /**
-     * 「本地识别引擎与模型」弹窗的分组数据：已安装置顶，其后按引擎家族分组，
+     * 「识别引擎与模型」弹窗的分组数据：已安装置顶，其后按引擎家族分组，
      * 组内按体积升序；每个选项只显示短标题 + 一行大小/状态，不再让长文字互串。
      */
     private fun engineRows(ctx: Context): List<EngineRow> {
@@ -470,14 +479,24 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             }
     }
 
+    /** 咩版把当前选中项用主题强调色标出，而不是只靠单选圈。 */
+    private fun accentColor(ctx: Context): Int {
+        val value = TypedValue()
+        return if (ctx.theme.resolveAttribute(android.R.attr.colorAccent, value, true)) {
+            value.data
+        } else {
+            0xFF7C4DFF.toInt()
+        }
+    }
+
     private fun headerView(ctx: Context, title: String): View {
         val d = ctx.resources.displayMetrics.density
         return TextView(ctx).apply {
             text = title
-            textSize = 13f
+            textSize = 12f
             setTypeface(typeface, Typeface.BOLD)
-            alpha = 0.78f
-            setPadding((20 * d).toInt(), (14 * d).toInt(), (20 * d).toInt(), (6 * d).toInt())
+            alpha = 0.7f
+            setPadding((24 * d).toInt(), (12 * d).toInt(), (24 * d).toInt(), (6 * d).toInt())
         }
     }
 
@@ -492,8 +511,8 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = (54 * d).toInt()
-            setPadding((16 * d).toInt(), (8 * d).toInt(), (16 * d).toInt(), (8 * d).toInt())
+            minimumHeight = (56 * d).toInt()
+            setPadding((24 * d).toInt(), (10 * d).toInt(), (24 * d).toInt(), (10 * d).toInt())
         }
         if (showRadio) {
             row.addView(
@@ -509,17 +528,18 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         texts.addView(
             TextView(ctx).apply {
                 text = title
-                textSize = 15f
+                textSize = 16f
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
                 setTypeface(typeface, if (checked) Typeface.BOLD else Typeface.NORMAL)
+                if (checked) setTextColor(accentColor(ctx))
             },
         )
         texts.addView(
             TextView(ctx).apply {
                 text = subtitle
-                textSize = 12f
-                alpha = 0.72f
+                textSize = 13f
+                alpha = 0.65f
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             },
@@ -556,7 +576,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             .show()
     }
 
-    /** 点击「模型下载源」：只做一件事——切换下载源。地址查看统一走上面的手动下载入口。 */
+    /** 切换下载源；手动下载 / 复制地址收进本弹窗，避免顶层再挂一个重复入口。 */
     private fun showSourceDialog(ctx: Context) {
         val original = LocalVoiceSettings.downloadSource(ctx)
         AlertDialog.Builder(ctx)
@@ -565,6 +585,10 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 LocalVoiceSettings.setDownloadSource(ctx, which)
             }
             .setPositiveButton(android.R.string.ok) { _, _ -> refresh(ctx) }
+            .setNeutralButton("模型地址") { _, _ ->
+                refresh(ctx)
+                showManualDownload(ctx)
+            }
             .setNegativeButton(android.R.string.cancel) { _, _ ->
                 LocalVoiceSettings.setDownloadSource(ctx, original)
                 refresh(ctx)
@@ -795,25 +819,49 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
 
         val family = LocalVoiceSettings.vendor(ctx)
         vendorPreference?.summary = buildEngineSummary(ctx, family)
+
+        // 咩版式：每项直接显示「当前：值」，说明不再塞进摘要。
         val threads = LocalVoiceSettings.threads(ctx, family).toString()
-        threadsPreference?.value = if (threads in THREAD_VALUES) threads else "2"
+        threadsPreference?.apply {
+            value = if (threads in THREAD_VALUES) threads else "2"
+            summary = "当前：$value 线程 · ${getString(R.string.local_asr_threads_summary)}"
+        }
         // 只有这两个家族的 sherpa-onnx 配置类带 language 字段；其余隐藏，避免给出无效选项。
         val supportsLanguage = family in LANGUAGE_FAMILIES
         languagePreference?.apply {
             isVisible = supportsLanguage
             if (supportsLanguage) {
                 val current = LocalVoiceSettings.language(ctx, family)
-                value = if (current in LANGUAGE_VALUES) current else ""
+                val v = if (current in LANGUAGE_VALUES) current else ""
+                value = v
+                summary = "当前：${LANGUAGE_LABELS[LANGUAGE_VALUES.indexOf(v)]}"
             }
         }
-        val keepAlive = LocalVoiceSettings.keepAliveMinutes(ctx, family).toString()
-        keepAlivePreference?.value = if (keepAlive in KEEP_ALIVE_VALUES) keepAlive else "-1"
-        val source = LocalVoiceSettings.downloadSource(ctx)
-        sourcePreference?.summary = ModelCatalog.SOURCES[source] + "\n点击切换下载源"
+        // ITN 只在引擎真正读取该字段的家族里显示。
+        itnPreference?.isVisible = family in ITN_FAMILIES
         itnPreference?.isChecked = LocalVoiceSettings.isItn(ctx, family)
+        val keepAlive = LocalVoiceSettings.keepAliveMinutes(ctx, family).toString()
+        keepAlivePreference?.apply {
+            val v = if (keepAlive in KEEP_ALIVE_VALUES) keepAlive else "-1"
+            value = v
+            summary = "当前：${KEEP_ALIVE_LABELS[KEEP_ALIVE_VALUES.indexOf(v)]}"
+        }
+
+        val source = LocalVoiceSettings.downloadSource(ctx)
+        sourcePreference?.summary = "当前：${ModelCatalog.SOURCES[source]}\n点击切换下载源或复制模型地址"
+
+        // 没有模型时，这一项变成咩版那种显眼的「下载并自动安装」主操作。
         val installedCount = ModelCatalog.VARIANTS.count { ModelInstaller.isInstalled(ctx, it) }
-        modelsPreference?.summary = getString(R.string.local_asr_models_summary) +
-            "\n已安装 $installedCount / ${ModelCatalog.VARIANTS.size} 个模型"
+        modelsPreference?.apply {
+            if (installedCount == 0) {
+                val rec = ModelCatalog.VARIANTS.minByOrNull { it.downloadMiB }
+                title = "下载并安装模型"
+                summary = "推荐 ${rec?.displayName ?: "最小模型"} · 约 ${rec?.downloadMiB ?: 0} MiB · 点击一键安装"
+            } else {
+                title = getString(R.string.local_asr_models)
+                summary = "已安装 $installedCount / ${ModelCatalog.VARIANTS.size} · 点击查看 / 下载 / 切换"
+            }
+        }
     }
 
     /** 设置项摘要直接显示当前引擎与模型，避免列表弹窗关闭后看不出选了什么。 */
@@ -827,37 +875,54 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             "$familyLabel · ${variant.label}" +
                 if (ModelInstaller.isInstalled(ctx, variant)) "（已安装）" else "（未安装）"
         }
-        return "当前：$current\n${getString(R.string.local_asr_vendor_summary)}"
+        return "当前：$current\n点击选择引擎 / 具体模型"
     }
 
+    /** 列表里只留两行状态；完整路径与缺件说明放到详情弹窗。 */
     private fun buildModelSummary(ctx: Context): String {
         val familyId = LocalVoiceSettings.vendor(ctx)
         val family = VoiceModels.family(familyId) ?: VoiceModels.FAMILIES.first()
-        val selected = LocalVoiceSettings.selectedVariant(ctx, familyId)
         val status = runCatching { VoiceModels.status(ctx, familyId) }.getOrNull()
-        return buildString {
-            if (status == null) {
-                append(getString(R.string.local_asr_model_unknown))
-                return@buildString
-            }
-            append(getString(R.string.local_asr_model_root, displayPath(ctx, status.root.absolutePath)))
-            append('\n')
-            append(getString(R.string.local_asr_tap_copy_path))
-            append('\n')
-            append("voice 固定在本应用私有目录，不随「使用者资料夹」变化")
-            append('\n')
+            ?: return getString(R.string.local_asr_model_unknown)
+        val shortFamily = family.label.substringBefore("（")
+        return if (status.ready) {
+            val dir = status.resolved?.dir?.let { displayPath(ctx, it.absolutePath) }
+                ?: getString(R.string.local_asr_model_ready)
+            "已就绪 · $shortFamily\n$dir · 点击查看详情"
+        } else {
+            "未检测到完整模型 · $shortFamily\n点击一键下载推荐模型"
+        }
+    }
+
+    /** 咩版式说明分层：完整模型信息（目录、缺件、官方包名）只在点击后展示。 */
+    private fun showModelDetail(ctx: Context) {
+        val familyId = LocalVoiceSettings.vendor(ctx)
+        val family = VoiceModels.family(familyId) ?: VoiceModels.FAMILIES.first()
+        val status = runCatching { VoiceModels.status(ctx, familyId) }.getOrNull()
+        val root = status?.root?.absolutePath ?: VoiceModels.primaryRoot(ctx).absolutePath
+        val message = buildString {
+            append(getString(R.string.local_asr_model_root, displayPath(ctx, root)))
+            append("\nvoice 固定在本应用私有目录，不随「使用者资料夹」变化\n")
+            val selected = LocalVoiceSettings.selectedVariant(ctx, familyId)
             if (selected.isNotBlank()) append("当前模型：$familyId/$selected\n")
-            if (status.ready) {
+            if (status?.ready == true) {
                 append(getString(R.string.local_asr_model_ready))
                 status.resolved?.dir?.let { append("\n检测到模型：${displayPath(ctx, it.absolutePath)}") }
             } else {
                 append(getString(R.string.local_asr_model_missing))
-                append("\n点击本项可一键下载推荐模型（自动安装并设为当前）")
                 append("\n需要文件：${family.groups.joinToString("、") { it.first() }}")
-                if (status.missing.isNotEmpty()) append("\n尚缺：${status.missing.joinToString("、")}")
+                if (status?.missing?.isNotEmpty() == true) {
+                    append("\n尚缺：${status.missing.joinToString("、")}")
+                }
                 append("\n官方模型包：${family.packageName}")
             }
         }
+        AlertDialog.Builder(ctx)
+            .setTitle(R.string.local_asr_model_status)
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, null)
+            .setNeutralButton(R.string.local_asr_copy_path) { _, _ -> copyPath(ctx, root) }
+            .show()
     }
 
     private companion object {
@@ -866,10 +931,11 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         const val KEY_VENDOR = "lv_vendor"
         const val KEY_PERMISSION = "lv_permission"
         const val KEY_STATUS = "lv_status"
+        const val KEY_CATEGORY_STATUS = "lv_category_status"
+        const val KEY_CATEGORY_BASIC = "lv_category_basic"
         const val KEY_CATEGORY_MODELS = "lv_category_models"
         const val KEY_MODELS = "lv_models"
         const val KEY_IMPORT_ZIP = "lv_import_zip"
-        const val KEY_MANUAL_DOWNLOAD = "lv_manual_download"
         const val KEY_SOURCE = "lv_source"
         const val KEY_CATEGORY_RECOG = "lv_category_recog"
         const val KEY_THREADS = "lv_threads"
@@ -891,10 +957,12 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         )
         /** AAR 中确实带 language 字段的离线家族。 */
         val LANGUAGE_FAMILIES = setOf("sensevoice", "funasr_nano")
+        /** 引擎里真正读取 ITN 的家族；其余家族隐藏该开关，避免给出无效选项。 */
+        val ITN_FAMILIES = LANGUAGE_FAMILIES
         val KEEP_ALIVE_VALUES = arrayOf("-1", "0", "5", "15", "30")
         val KEEP_ALIVE_LABELS = arrayOf(
-            "常驻内存（最快，但一直占用模型大小的内存）",
-            "用完即卸载（最省内存，每次需重新加载）",
+            "常驻内存（最快）",
+            "用完即卸载（最省内存）",
             "空闲 5 分钟后卸载",
             "空闲 15 分钟后卸载",
             "空闲 30 分钟后卸载",
