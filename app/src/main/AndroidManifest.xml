@@ -11,9 +11,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- 本地语音输入：识别在设备本地进行；INTERNET 仅用于下载离线模型包 -->
+    <!-- 本地语音输入：识别在设备本地进行；INTERNET 用于下载离线模型包与 WebDAV 同步 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- WebDAV「仅 Wi-Fi 同步」需要读取当前网络类型 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
@@ -38,6 +40,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         android:roundIcon="@mipmap/ic_app_icon_round"
         android:theme="@style/Theme.TrimeAppTheme"
         android:hasFragileUserData="true"
+        android:usesCleartextTraffic="true"
         tools:targetApi="29">
 
         <service

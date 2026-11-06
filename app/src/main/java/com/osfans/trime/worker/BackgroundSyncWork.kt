@@ -14,6 +14,8 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.osfans.trime.core.data.UserDataManager
+import com.osfans.trime.core.data.WebDavPrefs
+import com.osfans.trime.core.data.WebDavSync
 import com.osfans.trime.daemon.RimeDaemon
 import com.osfans.trime.data.prefs.AppPrefs
 import timber.log.Timber
@@ -44,6 +46,17 @@ class BackgroundSyncWork(
         val rime = RimeDaemon.createSession(javaClass.name)
         try {
             lastSyncStatus = rime.runOnReady { syncUserData() }
+            // 定时同步顺带跑一次 WebDAV；失败只记日志，不影响原有用户数据同步结果。
+            if (WebDavPrefs(applicationContext).enabled) {
+                try {
+                    val result = WebDavSync.sync(applicationContext)
+                    if (!result.succeeded) {
+                        Timber.w("WebDAV sync partial failure: %s", result.failed.joinToString("; "))
+                    }
+                } catch (e: Exception) {
+                    Timber.w(e, "WebDAV sync failed")
+                }
+            }
             lastSyncTime = System.currentTimeMillis()
             return if (lastSyncStatus) Result.success() else Result.retry()
         } finally {

@@ -5,19 +5,26 @@
 
 package com.osfans.trime.ui.main.settings
 
+import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.provider.DocumentsContract
+import android.text.InputType
+import android.widget.EditText
+import android.widget.FrameLayout
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
 import androidx.preference.ListPreference
 import androidx.preference.Preference
+import androidx.preference.PreferenceCategory
 import androidx.preference.SwitchPreferenceCompat
 import com.osfans.trime.R
 import com.osfans.trime.core.data.DataManager
 import com.osfans.trime.core.data.DataStorageMode
 import com.osfans.trime.core.data.UserDataManager
+import com.osfans.trime.core.data.WebDavPrefs
+import com.osfans.trime.core.data.WebDavSync
 import com.osfans.trime.data.prefs.AppPrefs
 import com.osfans.trime.data.prefs.PreferenceDelegate
 import com.osfans.trime.ui.common.PaddingPreferenceFragment
@@ -70,6 +77,8 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
     private lateinit var dataPathPreference: Preference
 
     private lateinit var editSyncIntervalPreference: EditTextIntPreference
+    private var webDavStatusPreference: Preference? = null
+    private var webDavSyncNowPreference: Preference? = null
 
     private val storageAccess = StorageAccess(this)
 
@@ -186,6 +195,121 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
             .Builder(requireContext())
             .setMessage(R.string.external_sync_fallback_app_storage)
             .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    /** WebDAV 配置项：用自己的 SharedPreferences 管理，避免与 Preference 内置存储不一致。 */
+    private fun webDavTextPreference(
+        ctx: Context,
+        key: String,
+        title: String,
+        hint: String,
+        password: Boolean = false,
+        getter: (WebDavPrefs) -> String,
+        setter: (WebDavPrefs, String) -> Unit,
+    ): Preference {
+        val prefs = WebDavPrefs(ctx.applicationContext)
+        return Preference(ctx).apply {
+            this.key = key
+            this.title = title
+            isIconSpaceReserved = false
+            fun shown(): String = when {
+                password && getter(prefs).isNotEmpty() -> "••••••（已设置）"
+                getter(prefs).isBlank() -> "未设置"
+                else -> getter(prefs)
+            }
+            summary = shown()
+            setOnPreferenceClickListener {
+                val pad = (20 * ctx.resources.displayMetrics.density).toInt()
+                val input =
+                    EditText(ctx).apply {
+                        setText(getter(prefs))
+                        setSelection(text.length)
+                        this.hint = hint
+                        setSingleLine(true)
+                        if (password) {
+                            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                        }
+                        setPadding(pad, pad / 2, pad, pad / 2)
+                    }
+                val box =
+                    FrameLayout(ctx).apply {
+                        setPadding(pad / 2, pad / 4, pad / 2, 0)
+                        addView(
+                            input,
+                            FrameLayout.LayoutParams(
+                                FrameLayout.LayoutParams.MATCH_PARENT,
+                                FrameLayout.LayoutParams.WRAP_CONTENT,
+                            ),
+                        )
+                    }
+                AlertDialog
+                    .Builder(ctx)
+                    .setTitle(title)
+                    .setView(box)
+                    .setPositiveButton(android.R.string.ok) { _, _ ->
+                        setter(prefs, input.text.toString().trim())
+                        summary = shown()
+                        updateWebDavUi()
+                    }.setNegativeButton(android.R.string.cancel, null)
+                    .show()
+                true
+            }
+        }
+    }
+
+    private fun updateWebDavUi() {
+        val ctx = context ?: return
+        val prefs = WebDavPrefs(ctx.applicationContext)
+        webDavStatusPreference?.summary = buildWebDavStatus(ctx, prefs)
+        webDavSyncNowPreference?.isEnabled = prefs.enabled && prefs.isConfigured()
+    }
+
+    private fun buildWebDavStatus(ctx: Context, prefs: WebDavPrefs): String = buildString {
+        append("状态：").append(if (prefs.enabled) "已启用" else "未启用")
+        append("\n配置：").append(if (prefs.isConfigured()) "已填写" else "未填写完整")
+        append("\n远端：").append(prefs.url.ifBlank { "未设置" })
+        if (prefs.remoteDir.isNotBlank()) append("/").append(prefs.remoteDir)
+        if (prefs.lastSyncTime > 0L) {
+            append("\n上次：").append(customFormatTimeInDefault("yyyy-MM-dd HH:mm", prefs.lastSyncTime))
+            if (prefs.lastSyncResult.isNotBlank()) append("\n结果：").append(prefs.lastSyncResult)
+        } else {
+            append("\n上次：尚未同步")
+        }
+    }
+
+    private fun startWebDavSync(ctx: Context) {
+        lifecycleScope.launch {
+            withLoadingDialog(ctx) {
+                val outcome =
+                    try {
+                        Result.success(WebDavSync.sync(ctx))
+                    } catch (e: Exception) {
+                        Result.failure(e)
+                    }
+                outcome
+                    .onSuccess { result ->
+                        if (result.succeeded) {
+                            // 让 Rime 重新加载同步后的配置与用户词库
+                            runCatching { viewModel.rime.runOnReady { syncUserData() } }
+                            ctx.toast("WebDAV 同步完成：${result.describe()}")
+                        } else {
+                            showWebDavFailures(ctx, result.failed)
+                        }
+                    }.onFailure { ctx.toast("WebDAV 同步失败：${it.message}") }
+                updateWebDavUi()
+            }
+        }
+    }
+
+    private fun showWebDavFailures(ctx: Context, failures: List<String>) {
+        AlertDialog
+            .Builder(ctx)
+            .setTitle("WebDAV 同步完成（部分失败）")
+            .setMessage(
+                failures.take(10).joinToString("\n") +
+                    if (failures.size > 10) "\n…共 ${failures.size} 项" else "",
+            ).setPositiveButton(android.R.string.ok, null)
             .show()
     }
 
@@ -310,6 +434,103 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
                     },
                 )
             }
+            addPreference(
+                PreferenceCategory(ctx).apply {
+                    key = "webdav_category"
+                    title = "WebDAV 同步"
+                    isIconSpaceReserved = false
+                },
+            )
+            addPreference(
+                SwitchPreferenceCompat(ctx).apply {
+                    key = "webdav_enabled"
+                    title = "启用 WebDAV 同步"
+                    summary = "把 rime 用户目录（配置 / 方案 / 词库）双向同步到服务器；不含 voice 模型"
+                    isIconSpaceReserved = false
+                    isChecked = WebDavPrefs(ctx).enabled
+                    setOnPreferenceChangeListener { _, value ->
+                        WebDavPrefs(ctx).enabled = value as Boolean
+                        updateWebDavUi()
+                        true
+                    }
+                },
+            )
+            addPreference(
+                webDavTextPreference(
+                    ctx,
+                    key = "webdav_url",
+                    title = "服务器地址",
+                    hint = "https://dav.example.com/remote.php/dav/files/alice",
+                    getter = { it.url },
+                    setter = { prefs, value -> prefs.url = value },
+                ),
+            )
+            addPreference(
+                webDavTextPreference(
+                    ctx,
+                    key = "webdav_username",
+                    title = "账号",
+                    hint = "WebDAV 登录名",
+                    getter = { it.username },
+                    setter = { prefs, value -> prefs.username = value },
+                ),
+            )
+            addPreference(
+                webDavTextPreference(
+                    ctx,
+                    key = "webdav_password",
+                    title = "密码 / 应用专用密码",
+                    hint = "建议用应用专用密码",
+                    password = true,
+                    getter = { it.password },
+                    setter = { prefs, value -> prefs.password = value },
+                ),
+            )
+            addPreference(
+                webDavTextPreference(
+                    ctx,
+                    key = "webdav_remote_dir",
+                    title = "远端目录",
+                    hint = "trime",
+                    getter = { it.remoteDir },
+                    setter = { prefs, value -> prefs.remoteDir = value },
+                ),
+            )
+            addPreference(
+                SwitchPreferenceCompat(ctx).apply {
+                    key = "webdav_wifi_only"
+                    title = "仅在 Wi-Fi 下同步"
+                    summary = "开启后移动数据网络会跳过 WebDAV 同步"
+                    isIconSpaceReserved = false
+                    isChecked = WebDavPrefs(ctx).wifiOnly
+                    setOnPreferenceChangeListener { _, value ->
+                        WebDavPrefs(ctx).wifiOnly = value as Boolean
+                        true
+                    }
+                },
+            )
+            addPreference(
+                Preference(ctx).apply {
+                    webDavSyncNowPreference = this
+                    key = "webdav_sync_now"
+                    title = "立即同步"
+                    summary = "与服务器比对并同步 rime 用户目录（配置 / 方案 / 词库）"
+                    isIconSpaceReserved = false
+                    setOnPreferenceClickListener {
+                        startWebDavSync(ctx)
+                        true
+                    }
+                },
+            )
+            addPreference(
+                Preference(ctx).apply {
+                    webDavStatusPreference = this
+                    key = "webdav_status"
+                    title = "同步状态"
+                    isIconSpaceReserved = false
+                    isSelectable = false
+                },
+            )
             addCategory(R.string.maintenance) {
                 isIconSpaceReserved = false
                 addPreference(
@@ -355,6 +576,7 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
             }
         }
         updateStorageModeUi()
+        updateWebDavUi()
     }
 
     override fun onDestroy() {
@@ -368,6 +590,7 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
     override fun onResume() {
         super.onResume()
         updateStorageModeUi()
+        updateWebDavUi()
         val ctx = requireContext()
         if (UserDataManager.useExternalSync() && !UserDataManager.hasExternalAccess()) {
             ctx.toast(R.string.data_path_permission_revoked)

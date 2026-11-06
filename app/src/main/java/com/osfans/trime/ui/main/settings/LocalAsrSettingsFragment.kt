@@ -13,14 +13,20 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import android.text.TextUtils
+import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
+import android.widget.BaseAdapter
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.RadioButton
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -49,12 +55,17 @@ import java.io.File
 
 class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
 
-    private data class EngineItem(val value: String, val label: String)
+    /** 模型选择弹窗的一行：分组标题不可点，选项带主/副两行文字。 */
+    private sealed interface EngineRow {
+        data class Header(val title: String) : EngineRow
+
+        data class Option(val value: String, val title: String, val subtitle: String) : EngineRow
+    }
 
     private val main = Handler(Looper.getMainLooper())
     private var modelStatusPreference: Preference? = null
     private var permissionPreference: Preference? = null
-    private var vendorPreference: ListPreference? = null
+    private var vendorPreference: Preference? = null
     private var threadsPreference: ListPreference? = null
     private var keepAlivePreference: ListPreference? = null
     private var sourcePreference: Preference? = null
@@ -108,13 +119,14 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             )
 
             addPreference(
-                ListPreference(ctx).apply {
+                Preference(ctx).apply {
                     key = KEY_VENDOR
                     title = getString(R.string.local_asr_vendor)
-                    summary = getString(R.string.local_asr_vendor_summary)
                     vendorPreference = this
-                    setSummaryProvider(ListPreference.SimpleSummaryProvider.getInstance())
-                    setOnPreferenceChangeListener { _, newValue -> onEngineSelected(ctx, newValue as String) }
+                    setOnPreferenceClickListener {
+                        showEnginePicker(ctx)
+                        true
+                    }
                 },
             )
 
@@ -297,39 +309,58 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         if (requestCode == REQUEST_MIC) context?.let(::refresh)
     }
 
-    /** 「本地识别引擎与模型」列表：每个家族一个自动扫描项 + 该家族下所有可下载模型。 */
-    private fun engineItems(ctx: Context): List<EngineItem> {
+    /**
+     * 「本地识别引擎与模型」弹窗的分组数据：已安装置顶，其后按引擎家族分组，
+     * 组内按体积升序；每个选项只显示短标题 + 一行大小/状态，不再让长文字互串。
+     */
+    private fun engineRows(ctx: Context): List<EngineRow> {
         val installed = getString(R.string.local_asr_model_installed)
         val notInstalled = getString(R.string.local_asr_model_not_installed)
-        val out = mutableListOf<EngineItem>()
-        VoiceModels.FAMILIES.forEach { family ->
-            val short = family.label.substringBefore("（")
-            out += EngineItem("${family.id}|", short)
-            // 已检测到完整模型的排在前面，方便直接切换，不必在长列表里找。
-            ModelCatalog.variantsOf(family.id)
-                .sortedByDescending { ModelInstaller.isInstalled(ctx, it) }
-                .forEach { variant ->
-                val state = if (ModelInstaller.isInstalled(ctx, variant)) installed else notInstalled
-                out += EngineItem(variant.id, "    ${variant.label} · ${variant.downloadMiB} MiB · $state")
+        val rows = mutableListOf<EngineRow>()
+        val ready = ModelCatalog.VARIANTS
+            .filter { ModelInstaller.isInstalled(ctx, it) }
+            .sortedWith(compareBy({ it.familyLabel }, { it.downloadMiB }))
+        if (ready.isNotEmpty()) {
+            rows += EngineRow.Header("已安装 · 点击设为当前")
+            ready.forEach { v ->
+                rows += EngineRow.Option(
+                    "${v.familyId}|${v.key}",
+                    "${v.familyLabel} · ${v.label}",
+                    "${v.downloadMiB} MiB · $installed",
+                )
             }
         }
-        return out
+        VoiceModels.FAMILIES.forEach { family ->
+            rows += EngineRow.Header(family.label.substringBefore("（"))
+            rows += EngineRow.Option("${family.id}|", "自动选择", "使用本引擎下已放置的模型")
+            ModelCatalog.variantsOf(family.id)
+                .filterNot { ModelInstaller.isInstalled(ctx, it) }
+                .sortedBy { it.downloadMiB }
+                .forEach { v ->
+                    rows += EngineRow.Option(
+                        "${v.familyId}|${v.key}",
+                        v.label,
+                        "${v.downloadMiB} MiB · $notInstalled · 点击下载",
+                    )
+                }
+        }
+        return rows
     }
 
-    /** 返回 false：value 由 refresh() 统一写入，避免未完成安装时就显示成已选中。 */
-    private fun onEngineSelected(ctx: Context, value: String): Boolean {
+    /** 自动项切换引擎；具体模型项要么设为当前，要么触发下载。 */
+    private fun onEngineSelected(ctx: Context, value: String) {
         val familyId = value.substringBefore('|')
         val variantKey = value.substringAfter('|')
         if (variantKey.isEmpty()) {
             LocalVoiceSettings.setVendor(ctx, familyId)
             LocalVoiceSettings.setSelectedVariant(ctx, familyId, "")
             refresh(ctx)
-            return false
+            return
         }
-        val variant = ModelCatalog.byId(value)
+        val variant = ModelCatalog.byId("$familyId/$variantKey")
         if (variant == null) {
             refresh(ctx)
-            return false
+            return
         }
         if (ModelInstaller.isInstalled(ctx, variant)) {
             LocalVoiceSettings.setVendor(ctx, familyId)
@@ -338,22 +369,42 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         } else {
             confirmDownload(ctx, variant) { refresh(ctx) }
         }
-        return false
     }
 
+    /** 自定义单选弹窗：分组标题不可点，选项两行文字 + 单选标记。 */
+    private fun showEnginePicker(ctx: Context) {
+        val rows = engineRows(ctx)
+        val family = LocalVoiceSettings.vendor(ctx)
+        val current = "$family|${LocalVoiceSettings.selectedVariant(ctx, family)}"
+        AlertDialog.Builder(ctx)
+            .setTitle(getString(R.string.local_asr_vendor))
+            .setAdapter(engineAdapter(ctx, rows, current, showRadio = true)) { dialog, which ->
+                val row = rows.getOrNull(which) as? EngineRow.Option ?: return@setAdapter
+                dialog.dismiss()
+                onEngineSelected(ctx, row.value)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** 「模型列表」弹窗：同样两行文字，按已安装 → 引擎家族 → 体积排序。 */
     private fun showModelList(ctx: Context) {
-        // 完整（已安装）的模型置顶。
-        val variants = ModelCatalog.VARIANTS.sortedByDescending { ModelInstaller.isInstalled(ctx, it) }
+        val variants = ModelCatalog.VARIANTS.sortedWith(
+            compareByDescending<ModelVariant> { ModelInstaller.isInstalled(ctx, it) }
+                .thenBy { it.familyLabel }
+                .thenBy { it.downloadMiB },
+        )
         val installed = getString(R.string.local_asr_model_installed)
         val notInstalled = getString(R.string.local_asr_model_not_installed)
-        val labels = variants.map { variant ->
-            val state = if (ModelInstaller.isInstalled(ctx, variant)) installed else notInstalled
-            "${variant.displayName}\n    ${variant.downloadMiB} MiB · $state"
-        }.toTypedArray()
+        val rows = variants.map { v ->
+            val state = if (ModelInstaller.isInstalled(ctx, v)) installed else notInstalled
+            EngineRow.Option(v.id, "${v.familyLabel} · ${v.label}", "${v.downloadMiB} MiB · $state")
+        }
         AlertDialog.Builder(ctx)
             .setTitle(R.string.local_asr_models)
-            .setItems(labels) { _, which ->
+            .setAdapter(engineAdapter(ctx, rows, current = "", showRadio = false)) { dialog, which ->
                 val variant = variants[which]
+                dialog.dismiss()
                 if (ModelInstaller.isInstalled(ctx, variant)) {
                     showInstalledActions(ctx, variant)
                 } else {
@@ -362,6 +413,86 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    private fun engineAdapter(
+        ctx: Context,
+        rows: List<EngineRow>,
+        current: String,
+        showRadio: Boolean,
+    ): BaseAdapter = object : BaseAdapter() {
+        override fun getCount(): Int = rows.size
+        override fun getItem(position: Int): EngineRow = rows[position]
+        override fun getItemId(position: Int): Long = position.toLong()
+        override fun getViewTypeCount(): Int = 2
+        override fun getItemViewType(position: Int): Int =
+            if (rows[position] is EngineRow.Header) 0 else 1
+        override fun isEnabled(position: Int): Boolean = rows[position] is EngineRow.Option
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
+            when (val row = rows[position]) {
+                is EngineRow.Header -> headerView(ctx, row.title)
+                is EngineRow.Option -> optionView(
+                    ctx, row.title, row.subtitle, showRadio && row.value == current, showRadio,
+                )
+            }
+    }
+
+    private fun headerView(ctx: Context, title: String): View {
+        val d = ctx.resources.displayMetrics.density
+        return TextView(ctx).apply {
+            text = title
+            textSize = 13f
+            setTypeface(typeface, Typeface.BOLD)
+            alpha = 0.78f
+            setPadding((20 * d).toInt(), (14 * d).toInt(), (20 * d).toInt(), (6 * d).toInt())
+        }
+    }
+
+    private fun optionView(
+        ctx: Context,
+        title: String,
+        subtitle: String,
+        checked: Boolean,
+        showRadio: Boolean,
+    ): View {
+        val d = ctx.resources.displayMetrics.density
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = (54 * d).toInt()
+            setPadding((16 * d).toInt(), (8 * d).toInt(), (16 * d).toInt(), (8 * d).toInt())
+        }
+        if (showRadio) {
+            row.addView(
+                RadioButton(ctx).apply {
+                    isChecked = checked
+                    isClickable = false
+                    isFocusable = false
+                    setPadding(0, 0, (8 * d).toInt(), 0)
+                },
+            )
+        }
+        val texts = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        texts.addView(
+            TextView(ctx).apply {
+                text = title
+                textSize = 15f
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                setTypeface(typeface, if (checked) Typeface.BOLD else Typeface.NORMAL)
+            },
+        )
+        texts.addView(
+            TextView(ctx).apply {
+                text = subtitle
+                textSize = 12f
+                alpha = 0.72f
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            },
+        )
+        row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        return row
     }
 
     private fun showInstalledActions(ctx: Context, variant: ModelVariant) {
@@ -629,15 +760,8 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         }
         modelStatusPreference?.summary = buildModelSummary(ctx)
 
-        val items = engineItems(ctx)
-        vendorPreference?.apply {
-            entries = items.map { it.label }.toTypedArray()
-            entryValues = items.map { it.value }.toTypedArray()
-            val family = LocalVoiceSettings.vendor(ctx)
-            val wanted = "$family|${LocalVoiceSettings.selectedVariant(ctx, family)}"
-            value = if (items.any { it.value == wanted }) wanted else "$family|"
-        }
         val family = LocalVoiceSettings.vendor(ctx)
+        vendorPreference?.summary = buildEngineSummary(ctx, family)
         val threads = LocalVoiceSettings.threads(ctx, family).toString()
         threadsPreference?.value = if (threads in THREAD_VALUES) threads else "2"
         val keepAlive = LocalVoiceSettings.keepAliveMinutes(ctx, family).toString()
@@ -648,6 +772,20 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         val installedCount = ModelCatalog.VARIANTS.count { ModelInstaller.isInstalled(ctx, it) }
         modelsPreference?.summary = getString(R.string.local_asr_models_summary) +
             "\n已安装 $installedCount / ${ModelCatalog.VARIANTS.size} 个模型"
+    }
+
+    /** 设置项摘要直接显示当前引擎与模型，避免列表弹窗关闭后看不出选了什么。 */
+    private fun buildEngineSummary(ctx: Context, family: String): String {
+        val familyLabel = VoiceModels.family(family)?.label?.substringBefore("（") ?: family
+        val key = LocalVoiceSettings.selectedVariant(ctx, family)
+        val variant = ModelCatalog.VARIANTS.firstOrNull { it.familyId == family && it.key == key }
+        val current = if (variant == null) {
+            "$familyLabel · 自动选择"
+        } else {
+            "$familyLabel · ${variant.label}" +
+                if (ModelInstaller.isInstalled(ctx, variant)) "（已安装）" else "（未安装）"
+        }
+        return "当前：$current\n${getString(R.string.local_asr_vendor_summary)}"
     }
 
     private fun buildModelSummary(ctx: Context): String {
