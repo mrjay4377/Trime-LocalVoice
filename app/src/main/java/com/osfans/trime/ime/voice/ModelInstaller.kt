@@ -417,7 +417,9 @@ object ModelInstaller {
         }
         val conn = URL(url).openConnection() as HttpURLConnection
         try {
-            conn.connectTimeout = 30_000
+            // 连接超时短一些：某个镜像不通时能快速切到下一个源；读取超时仍保留 30 秒，
+            // 避免几百 MB 的大文件下载因短暂抖动被误判为失败。
+            conn.connectTimeout = 15_000
             conn.readTimeout = 30_000
             conn.instanceFollowRedirects = true
             conn.setRequestProperty("User-Agent", "TrimeLocalVoice/1.0")
@@ -526,6 +528,8 @@ object ModelInstaller {
 
     private fun verify(spec: ModelFileSpec, file: File, active: () -> Unit): Boolean {
         if (file.length() != spec.sizeBytes) return false
+        // 上游未提供校验值时按「同名 + 大小一致」放行，省去对几百 MB 文件做无谓的哈希。
+        if (spec.sha256.isBlank()) return true
         val digest = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { ins ->
             val buf = ByteArray(1 shl 16)

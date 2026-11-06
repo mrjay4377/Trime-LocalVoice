@@ -92,6 +92,15 @@ object VoiceModels {
             ),
             packageName = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
         ),
+        VoiceFamily(
+            id = "telespeech",
+            label = "TeleSpeech CTC（中文，约 340MB，体积最小）",
+            groups = listOf(
+                listOf("tokens.txt"),
+                listOf("model.int8.onnx", "model.onnx"),
+            ),
+            packageName = "sherpa-onnx-telespeech-ctc-int8-zh-2024-06-04",
+        ),
     )
 
     fun family(id: String): VoiceFamily? = FAMILIES.firstOrNull { it.id == id }

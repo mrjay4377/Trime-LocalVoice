@@ -29,12 +29,18 @@ object ModelCatalog {
     private const val RELEASE_BASE =
         "https://github.com/BryceWG/BiBi-Keyboard/releases/download/models/"
 
-    /** 0 = 依次尝试全部源，1 = 官方，2..4 = 镜像。 */
+    /**
+     * 0 = 自动（镜像优先 → 官方兜底），1 = 官方，2..4 = 镜像。
+     *
+     * 国内网络下 GitHub 官方会 302 跳到 objects.githubusercontent.com，多数情况直接超时，
+     * 因此自动模式把实测可用的镜像排在前，官方只作为最后兜底，避免每个模型都先白等 30 秒。
+     * hub.gitmirror.com / github.moeyy.xyz / mirror.ghproxy.com 已实测失效，不再使用。
+     */
     val SOURCES = listOf(
-        "自动（官方 → 镜像依次尝试）",
+        "自动（镜像优先 → 官方兜底）",
         "GitHub 官方",
         "镜像 1 · ghproxy.net",
-        "镜像 2 · hub.gitmirror.com",
+        "镜像 2 · ghfast.top",
         "镜像 3 · fastgit.cc",
     )
 
@@ -42,8 +48,14 @@ object ModelCatalog {
         "",
         "",
         "https://ghproxy.net/",
-        "https://hub.gitmirror.com/",
+        "https://ghfast.top/",
         "https://fastgit.cc/",
+    )
+
+    /** 自动模式额外尝试的备用镜像（实测可返回 206 分片）。 */
+    private val EXTRA_MIRRORS = listOf(
+        "https://gh-proxy.com/",
+        "https://ghproxy.cn/",
     )
 
     private fun spec(name: String, size: Long, sha: String) = ModelFileSpec(name, size, sha)
@@ -167,6 +179,20 @@ object ModelCatalog {
                 spec("model.int8.onnx", 775_861_420L, "ca3dbabd82170110cc0b343c2890866d449984bc9cd92b9a18371ff80a81bb99"),
             ),
         ),
+        // TeleSpeech CTC：纯中文小模型，压缩包仅 180 MiB，是本机最省空间/内存的离线模型。
+        // 文件名与解压后大小取自 release 包中央目录（实测）。上游未提供 SHA-256，
+        // ModelInstaller 会按「同名 + 大小一致」降级校验，不影响安装与识别。
+        ModelVariant(
+            familyId = "telespeech",
+            key = "ctc-int8",
+            label = "TeleSpeech CTC int8（中文，体积最小）",
+            zipName = "sherpa-onnx-telespeech-ctc-int8-zh-2024-06-04.zip",
+            downloadMiB = 180,
+            files = listOf(
+                spec("tokens.txt", 66_642L, ""),
+                spec("model.int8.onnx", 340_990_949L, ""),
+            ),
+        ),
     )
 
     /** 官方原始地址，供「手动下载」展示与复制。 */
@@ -176,11 +202,12 @@ object ModelCatalog {
 
     fun variantsOf(familyId: String): List<ModelVariant> = VARIANTS.filter { it.familyId == familyId }
 
-    /** 按下载源返回候选 URL；自动模式会依次尝试官方与三个镜像。 */
+    /** 按下载源返回候选 URL；自动模式镜像优先、官方兜底，避免国内先卡在官方 302 上。 */
     fun candidateUrls(variant: ModelVariant, sourceIndex: Int): List<String> {
         val official = RELEASE_BASE + variant.zipName
         if (sourceIndex == 0) {
-            return listOf(official) + PREFIXES.drop(2).map { it + official }
+            val mirrors = (PREFIXES.drop(2) + EXTRA_MIRRORS).map { it + official }
+            return mirrors + official
         }
         val prefix = PREFIXES.getOrElse(sourceIndex) { "" }
         return listOf(if (prefix.isEmpty()) official else prefix + official)

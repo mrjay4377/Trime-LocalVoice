@@ -326,7 +326,9 @@ class OfflineSherpaEngine(
         val feat = Class.forName("com.k2fsa.sherpa.onnx.FeatureConfig").getDeclaredConstructor().newInstance()
         sherpaTrySetField(feat, "sampleRate", AudioRecorder.SAMPLE_RATE)
         sherpaTrySetField(feat, "featureDim", 80)
-        if (familyId == "parakeet" || familyId == "firered_asr") sherpaTrySetField(feat, "dither", 0.0f)
+        if (familyId == "parakeet" || familyId == "firered_asr" || familyId == "telespeech") {
+            sherpaTrySetField(feat, "dither", 0.0f)
+        }
         return feat
     }
 
@@ -418,6 +420,14 @@ class OfflineSherpaEngine(
             sherpaTrySetField(ctc, "model", paths.getValue("model.int8.onnx"))
             val modelConfig = baseModelConfig(paths.getValue("tokens.txt"))
             sherpaTrySetField(modelConfig, "fireRedAsrCtc", ctc)
+            finalizeRecognizerConfig(modelConfig, withFeat = true)
+        }
+
+        // TeleSpeech CTC：sherpa-onnx 把它做成 OfflineModelConfig 的 teleSpeech 字符串字段
+        // （模型路径），配合 tokens + featConfig + greedy_search，不需要单独的 Config 类。
+        "telespeech" -> {
+            val modelConfig = baseModelConfig(paths.getValue("tokens.txt"))
+            sherpaTrySetField(modelConfig, "teleSpeech", paths.getValue("model.int8.onnx"))
             finalizeRecognizerConfig(modelConfig, withFeat = true)
         }
 

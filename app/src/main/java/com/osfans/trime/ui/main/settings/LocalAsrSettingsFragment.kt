@@ -67,6 +67,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     private var permissionPreference: Preference? = null
     private var vendorPreference: Preference? = null
     private var threadsPreference: ListPreference? = null
+    private var languagePreference: ListPreference? = null
     private var keepAlivePreference: ListPreference? = null
     private var sourcePreference: Preference? = null
     private var itnPreference: SwitchPreferenceCompat? = null
@@ -99,7 +100,19 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     isSelectable = true
                     modelStatusPreference = this
                     setOnPreferenceClickListener {
-                        copyPath(ctx, VoiceModels.primaryRoot(ctx).absolutePath)
+                        val status = runCatching { VoiceModels.status(ctx, LocalVoiceSettings.vendor(ctx)) }
+                            .getOrNull()
+                        if (status?.ready == true) {
+                            copyPath(ctx, VoiceModels.primaryRoot(ctx).absolutePath)
+                        } else {
+                            // 还没有可用模型时，直接给出一键下载入口，避免只显示路径却无从下手。
+                            val recommended = ModelCatalog.VARIANTS.minByOrNull { it.downloadMiB }
+                            if (recommended != null) {
+                                confirmDownload(ctx, recommended) { refresh(ctx) }
+                            } else {
+                                showModelList(ctx)
+                            }
+                        }
                         true
                     }
                 },
@@ -230,6 +243,26 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                             ctx,
                             LocalVoiceSettings.vendor(ctx),
                             (newValue as String).toInt(),
+                        )
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                ListPreference(ctx).apply {
+                    key = KEY_LANGUAGE
+                    title = "识别语言"
+                    summary = "指定音频语种可提升准确率；仅对 SenseVoice、FunASR Nano 生效"
+                    entries = LANGUAGE_LABELS
+                    entryValues = LANGUAGE_VALUES
+                    languagePreference = this
+                    setSummaryProvider(ListPreference.SimpleSummaryProvider.getInstance())
+                    setOnPreferenceChangeListener { _, newValue ->
+                        LocalVoiceSettings.setLanguage(
+                            ctx,
+                            LocalVoiceSettings.vendor(ctx),
+                            newValue as String,
                         )
                         true
                     }
@@ -764,6 +797,15 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         vendorPreference?.summary = buildEngineSummary(ctx, family)
         val threads = LocalVoiceSettings.threads(ctx, family).toString()
         threadsPreference?.value = if (threads in THREAD_VALUES) threads else "2"
+        // 只有这两个家族的 sherpa-onnx 配置类带 language 字段；其余隐藏，避免给出无效选项。
+        val supportsLanguage = family in LANGUAGE_FAMILIES
+        languagePreference?.apply {
+            isVisible = supportsLanguage
+            if (supportsLanguage) {
+                val current = LocalVoiceSettings.language(ctx, family)
+                value = if (current in LANGUAGE_VALUES) current else ""
+            }
+        }
         val keepAlive = LocalVoiceSettings.keepAliveMinutes(ctx, family).toString()
         keepAlivePreference?.value = if (keepAlive in KEEP_ALIVE_VALUES) keepAlive else "-1"
         val source = LocalVoiceSettings.downloadSource(ctx)
@@ -810,6 +852,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 status.resolved?.dir?.let { append("\n检测到模型：${displayPath(ctx, it.absolutePath)}") }
             } else {
                 append(getString(R.string.local_asr_model_missing))
+                append("\n点击本项可一键下载推荐模型（自动安装并设为当前）")
                 append("\n需要文件：${family.groups.joinToString("、") { it.first() }}")
                 if (status.missing.isNotEmpty()) append("\n尚缺：${status.missing.joinToString("、")}")
                 append("\n官方模型包：${family.packageName}")
@@ -830,11 +873,24 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         const val KEY_SOURCE = "lv_source"
         const val KEY_CATEGORY_RECOG = "lv_category_recog"
         const val KEY_THREADS = "lv_threads"
+        const val KEY_LANGUAGE = "lv_language"
         const val KEY_ITN = "lv_itn"
         const val KEY_KEEP_ALIVE = "lv_keep_alive"
         const val KEY_SAVE_RECORDING = "lv_save_recording"
         const val KEY_USAGE = "lv_usage"
         val THREAD_VALUES = arrayOf("1", "2", "3", "4", "6", "8")
+        /** 空串 = 自动识别（与 LocalVoiceSettings.language 默认值、引擎 ifBlank{"auto"} 一致）。 */
+        val LANGUAGE_VALUES = arrayOf("", "zh", "en", "ja", "ko", "yue")
+        val LANGUAGE_LABELS = arrayOf(
+            "自动识别（推荐）",
+            "中文",
+            "英文",
+            "日文",
+            "韩文",
+            "粤语",
+        )
+        /** AAR 中确实带 language 字段的离线家族。 */
+        val LANGUAGE_FAMILIES = setOf("sensevoice", "funasr_nano")
         val KEEP_ALIVE_VALUES = arrayOf("-1", "0", "5", "15", "30")
         val KEEP_ALIVE_LABELS = arrayOf(
             "常驻内存（最快，但一直占用模型大小的内存）",

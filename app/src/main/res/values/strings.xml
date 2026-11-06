@@ -274,7 +274,7 @@
     <string name="local_asr_models">模型下载与管理</string>
     <string name="local_asr_models_summary">查看全部可下载模型，一键下载、解压、校验并自动安装到 voice 目录；识别过程不联网</string>
     <string name="local_asr_source">模型下载源</string>
-    <string name="local_asr_source_summary">国内网络若 GitHub 官方不通可改用镜像；自动模式会依次尝试全部可用源</string>
+    <string name="local_asr_source_summary">自动模式优先走国内可用镜像、GitHub 官方仅作兜底；也可手动指定单一镜像</string>
     <string name="local_asr_download_confirm">%1$s\n下载约 %2$d MiB，将自动解压、校验并安装到 voice 目录。建议在 Wi-Fi 下进行。</string>
     <string name="local_asr_install_title">正在安装模型</string>
     <string name="local_asr_install_done">模型安装完成</string>
