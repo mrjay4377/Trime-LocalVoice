@@ -10,3 +10,14 @@ local.properties
 *.bak
 .DS_Store
 Thumbs.db
+
+# 第三方依赖源码 / 大型二进制（可从官方仓库或 Maven 重建）
+trime/app/src/main/jni/boost/
+trime/app/src/main/jni/boost-*.tar.xz
+trime/app/src/main/jni/librime/
+trime/app/src/main/jni/snappy/
+trime/app/src/main/jni/librime-lua*/
+trime/app/src/main/jni/librime-octagram/
+trime/app/src/main/jni/librime-predict/
+trime/app/boost-*.tar.xz
+trime/app/libs/
