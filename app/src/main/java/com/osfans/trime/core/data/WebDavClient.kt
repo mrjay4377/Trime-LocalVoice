@@ -1,27 +1,32 @@
 /*
- * 极简 WebDAV 客户端：只依赖 HttpURLConnection，实现 PROPFIND / MKCOL / GET / PUT + Basic 认证。
- * 兼容坚果云 / Nextcloud / ownCloud / 群晖 / nginx-dav 等常见服务；不引入第三方网络库，避免增大安装包。
+ * 极简 WebDAV 客户端：PROPFIND / MKCOL / GET / PUT + Basic 认证。
+ * 兼容坚果云 / Nextcloud / ownCloud / 群晖 / nginx-dav 等常见服务。
  *
- * 关键点：Android 内置的 HttpURLConnection（com.android.okhttp...）把请求方法限制在
- * OPTIONS/GET/HEAD/POST/PUT/DELETE/TRACE/CONNECT/PATCH，直接 setRequestMethod("PROPFIND")
- * 会抛 ProtocolException「Expected one of [OPTIONS, GET, HEAD, POS...]」，WebDAV 同步必然失败。
- * 这里先尝试把 WebDAV 方法加进实现类的静态白名单，再退化为反射写 java.net.HttpURLConnection
- * 的 protected method 字段（公开 SDK 类，反射不受隐藏 API 限制），无需引入 OkHttp。
+ * 为什么用 OkHttp：Android 内置的 HttpURLConnection（com.android.okhttp...）把请求方法
+ * 限制在 9 个标准动词里，PROPFIND/MKCOL 会抛「Expected one of [OPTIONS, GET, HEAD, POS...]」；
+ * 反射写 method 字段在部分 ROM 上会被隐藏 API 限制挡住（实现类自带同名字段，改不到），
+ * 所以 v26 起改用 OkHttp —— 它原生支持任意 HTTP 方法，且 TLS/SNI、重定向、gzip 都处理妥当。
  */
 package com.osfans.trime.core.data
 
 import android.util.Base64
 import android.util.Xml
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okio.BufferedSink
 import org.xmlpull.v1.XmlPullParser
 import java.io.File
 import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.ProtocolException
 import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 class WebDavException(message: String) : IOException(message)
 
@@ -40,6 +45,15 @@ class WebDavClient(
 
     /** 已归一化、以 / 结尾的集合 URL（含 remoteDir）。 */
     private val root: String = buildRoot(baseUrl, remoteDir)
+
+    private val client: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(CONNECT_TIMEOUT_S, TimeUnit.SECONDS)
+        .readTimeout(READ_TIMEOUT_S, TimeUnit.SECONDS)
+        .writeTimeout(READ_TIMEOUT_S, TimeUnit.SECONDS)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .retryOnConnectionFailure(true)
+        .build()
 
     private fun auth(): String = "Basic " + Base64.encodeToString(
         "$username:$password".toByteArray(Charsets.UTF_8),
@@ -74,86 +88,25 @@ class WebDavClient(
         return URL(root + suffix)
     }
 
-    private fun openUrl(method: String, url: URL): HttpURLConnection {
-        val conn = url.openConnection() as HttpURLConnection
-        applyMethod(conn, method)
-        conn.setRequestProperty("Authorization", auth())
-        // 坚果云等服务器会拒绝没有 User-Agent 的 WebDAV 请求。
-        conn.setRequestProperty("User-Agent", USER_AGENT)
-        conn.setRequestProperty("Accept", "*/*")
-        conn.connectTimeout = CONNECT_TIMEOUT_MS
-        conn.readTimeout = READ_TIMEOUT_MS
-        conn.doInput = true
-        conn.instanceFollowRedirects = false
-        return conn
-    }
-
-    /**
-     * 让 Android 的 HttpURLConnection 接受 WebDAV 专有方法。
-     * 依次尝试：正规 API → 扩充实现类静态白名单 → 反射写 method 字段。
-     */
-    private fun applyMethod(conn: HttpURLConnection, method: String) {
-        try {
-            conn.setRequestMethod(method)
-            return
-        } catch (_: ProtocolException) {
-            // 落到兼容路径
-        }
-        patchMethodWhitelist()
-        try {
-            conn.setRequestMethod(method)
-            if (method.equals(conn.requestMethod, ignoreCase = true)) return
-        } catch (_: ProtocolException) {
-            // 部分 ROM 的白名单不可写，继续用反射
-        }
-        // HttpURLConnection.method 是公开 SDK 类的 protected 字段；沿继承链把所有同名字段
-        // 都写上，兼容存在隐藏字段的实现类。
-        var patched = false
-        var cls: Class<*>? = conn.javaClass
-        while (cls != null) {
-            val current = cls
-            runCatching {
-                val field = current.getDeclaredField("method")
-                if (field.type == String::class.java) {
-                    field.isAccessible = true
-                    field.set(conn, method)
-                    patched = true
+    /** 大文件边读边写，不整块载入内存；contentLength 让 OkHttp 不启用 chunked 传输。 */
+    private fun fileBody(file: File): RequestBody = object : RequestBody() {
+        override fun contentType() = OCTET_STREAM
+        override fun contentLength(): Long = file.length()
+        override fun writeTo(sink: BufferedSink) {
+            file.inputStream().use { input ->
+                val buf = ByteArray(BUFFER_SIZE)
+                while (true) {
+                    val n = input.read(buf)
+                    if (n <= 0) break
+                    sink.write(buf, 0, n)
                 }
             }
-            cls = current.superclass
-        }
-        if (!patched || !method.equals(conn.requestMethod, ignoreCase = true)) {
-            throw WebDavException(
-                "当前系统不允许使用 WebDAV 方法 $method（请确认服务器地址是 WebDAV 地址）",
-            )
         }
     }
-
-    /** 各 Android 版本内置 OkHttp 实现类的位置不同，逐个尝试；失败不影响后续反射兜底。 */
-    private fun patchMethodWhitelist() {
-        for (name in IMPL_CLASSES) {
-            runCatching {
-                val cls = Class.forName(name)
-                val field = cls.getDeclaredField("METHODS")
-                field.isAccessible = true
-                @Suppress("UNCHECKED_CAST")
-                val methods = field.get(null) as? MutableSet<String>
-                methods?.add("PROPFIND")
-                methods?.add("MKCOL")
-            }
-        }
-    }
-
-    private class Response(
-        val conn: HttpURLConnection,
-        val code: Int,
-        val message: String,
-    )
 
     /**
-     * 统一的请求执行：带 Body 的 PROPFIND / PUT、无 Body 的 MKCOL / GET 都走这里，
-     * 并手动处理 301/302/307/308（HttpURLConnection 默认不会带 Body 跟随重定向）。
-     * 重定向只允许同主机，避免把 Basic 凭据发到第三方地址。
+     * 手动跟随 301/302/307/308（只限同主机，避免把 Basic 凭据发到第三方地址）。
+     * 返回的 Response 由调用方 use{} 关闭。
      */
     private fun request(
         method: String,
@@ -166,46 +119,34 @@ class WebDavClient(
         var url = urlOf(relative, directory)
         var redirects = 0
         while (true) {
-            var opened: HttpURLConnection? = null
-            try {
-                val conn = openUrl(method, url)
-                opened = conn
-                headers.forEach { (key, value) -> conn.setRequestProperty(key, value) }
-                when {
-                    body != null -> {
-                        conn.doOutput = true
-                        conn.setFixedLengthStreamingMode(body.size)
-                        conn.outputStream.use { it.write(body) }
-                    }
-                    upload != null -> {
-                        conn.doOutput = true
-                        conn.setFixedLengthStreamingMode(upload.length().toInt())
-                        conn.outputStream.use { out ->
-                            upload.inputStream().use { it.copyTo(out, BUFFER_SIZE) }
-                        }
-                    }
-                }
-                val code = conn.responseCode
-                val message = conn.responseMessage.orEmpty()
-                val location = conn.getHeaderField("Location")
-                if (code in REDIRECT_CODES && !location.isNullOrBlank() && redirects < MAX_REDIRECTS) {
-                    val next = runCatching { URL(url, location) }.getOrNull()
-                    if (next != null &&
-                        next.host.equals(url.host, ignoreCase = true) &&
-                        (next.protocol.equals("http", true) || next.protocol.equals("https", true))
-                    ) {
-                        conn.disconnect()
-                        opened = null
-                        url = next
-                        redirects++
-                        continue
-                    }
-                }
-                return Response(conn, code, message)
-            } catch (t: Throwable) {
-                opened?.disconnect()
-                throw t
+            val builder = Request.Builder()
+                .url(url.toString())
+                .header("Authorization", auth())
+                // 坚果云等服务器会拒绝没有 User-Agent 的 WebDAV 请求
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "*/*")
+            headers.forEach { (key, value) -> builder.header(key, value) }
+            val requestBody = when {
+                body != null -> body.toRequestBody(XML_MEDIA_TYPE)
+                upload != null -> fileBody(upload)
+                else -> null
             }
+            val response = client.newCall(builder.method(method, requestBody).build()).execute()
+            val code = response.code
+            val location = response.header("Location")
+            if (code in REDIRECT_CODES && !location.isNullOrBlank() && redirects < MAX_REDIRECTS) {
+                val next = runCatching { URL(url, location) }.getOrNull()
+                if (next != null &&
+                    next.host.equals(url.host, ignoreCase = true) &&
+                    (next.protocol.equals("http", true) || next.protocol.equals("https", true))
+                ) {
+                    response.close()
+                    url = next
+                    redirects++
+                    continue
+                }
+            }
+            return response
         }
     }
 
@@ -225,12 +166,12 @@ class WebDavClient(
 
     /** 确保配置的远端根目录存在；405/403/409 表示目录已存在或不允许重复创建，视为可用。 */
     fun ensureRoot() {
-        val response = request("MKCOL", "", directory = true)
-        response.conn.disconnect()
-        if (response.code !in 200..299 && response.code != 403 &&
-            response.code != 405 && response.code != 409
-        ) {
-            throw httpError("访问 WebDAV 目录", "", response.code, response.message)
+        request("MKCOL", "", directory = true).use { response ->
+            if (response.code !in 200..299 &&
+                response.code != 403 && response.code != 405 && response.code != 409
+            ) {
+                throw httpError("访问 WebDAV 目录", "", response.code, response.message)
+            }
         }
     }
 
@@ -240,10 +181,10 @@ class WebDavClient(
         var current = ""
         for (part in parts) {
             current = if (current.isEmpty()) part else "$current/$part"
-            val response = request("MKCOL", current, directory = true)
-            response.conn.disconnect()
-            if (response.code !in 200..299 && response.code != 405 && response.code != 409) {
-                throw httpError("创建远端目录", current, response.code, response.message)
+            request("MKCOL", current, directory = true).use { response ->
+                if (response.code !in 200..299 && response.code != 405 && response.code != 409) {
+                    throw httpError("创建远端目录", current, response.code, response.message)
+                }
             }
         }
     }
@@ -254,39 +195,27 @@ class WebDavClient(
     }
 
     /** PROPFIND Depth:1 列出一层子项；207 Multi-Status 属于 2xx。 */
-    fun list(relative: String): List<Entry> {
-        val response = request(
+    fun list(relative: String): List<Entry> =
+        request(
             method = "PROPFIND",
             relative = relative,
             directory = true,
-            headers = mapOf(
-                "Depth" to "1",
-                "Content-Type" to "application/xml; charset=utf-8",
-            ),
+            headers = mapOf("Depth" to "1"),
             body = PROPFIND_BODY.toByteArray(Charsets.UTF_8),
-        )
-        try {
+        ).use { response ->
             if (response.code !in 200..299) {
                 throw httpError("读取远端目录", relative, response.code, response.message)
             }
-            val xml = response.conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            return parsePropfind(xml)
-        } finally {
-            response.conn.disconnect()
+            val xml = response.body?.string()
+                ?: throw WebDavException("读取远端目录 $relative 失败：服务器返回空内容")
+            parsePropfind(xml)
         }
-    }
 
     fun upload(file: File, relative: String) {
-        require(file.length() <= Int.MAX_VALUE) { "文件过大，无法上传：$relative" }
-        val response = request(
-            method = "PUT",
-            relative = relative,
-            headers = mapOf("Content-Type" to "application/octet-stream"),
-            upload = file,
-        )
-        response.conn.disconnect()
-        if (response.code !in 200..299) {
-            throw httpError("上传", relative, response.code, response.message)
+        request("PUT", relative, upload = file).use { response ->
+            if (response.code !in 200..299) {
+                throw httpError("上传", relative, response.code, response.message)
+            }
         }
     }
 
@@ -295,16 +224,15 @@ class WebDavClient(
         target.parentFile?.mkdirs()
         val tmp = File(target.parentFile, "${target.name}.webdav.tmp")
         try {
-            val response = request("GET", relative)
-            try {
+            request("GET", relative).use { response ->
                 if (response.code !in 200..299) {
                     throw httpError("下载", relative, response.code, response.message)
                 }
-                response.conn.inputStream.use { input ->
+                val stream = response.body?.byteStream()
+                    ?: throw WebDavException("下载 $relative 失败：服务器返回空内容")
+                stream.use { input ->
                     tmp.outputStream().use { out -> input.copyTo(out, BUFFER_SIZE) }
                 }
-            } finally {
-                response.conn.disconnect()
             }
             if (tmp.exists() && !tmp.renameTo(target)) {
                 tmp.copyTo(target, overwrite = true)
@@ -393,17 +321,14 @@ class WebDavClient(
     }
 
     private companion object {
-        const val CONNECT_TIMEOUT_MS = 15_000
-        const val READ_TIMEOUT_MS = 60_000
+        const val CONNECT_TIMEOUT_S = 15L
+        const val READ_TIMEOUT_S = 60L
         const val BUFFER_SIZE = 64 * 1024
         const val USER_AGENT = "TrimeLocalVoice-WebDAV/1.0"
         const val MAX_REDIRECTS = 3
         val REDIRECT_CODES = setOf(301, 302, 307, 308)
-        val IMPL_CLASSES = arrayOf(
-            "com.android.okhttp.internal.huc.HttpURLConnectionImpl",
-            "com.squareup.okhttp.internal.huc.HttpURLConnectionImpl",
-            "libcore.net.http.HttpURLConnectionImpl",
-        )
+        val XML_MEDIA_TYPE = "application/xml; charset=utf-8".toMediaType()
+        val OCTET_STREAM = "application/octet-stream".toMediaType()
         const val PROPFIND_BODY = """<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:"><d:prop>
 <d:resourcetype/><d:getlastmodified/><d:getcontentlength/>

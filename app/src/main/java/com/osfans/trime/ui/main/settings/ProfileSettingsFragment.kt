@@ -268,8 +268,10 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
     private fun buildWebDavStatus(ctx: Context, prefs: WebDavPrefs): String = buildString {
         append("状态：").append(if (prefs.enabled) "已启用" else "未启用")
         append("\n配置：").append(if (prefs.isConfigured()) "已填写" else "未填写完整")
-        append("\n远端：").append(prefs.url.ifBlank { "未设置" })
-        if (prefs.remoteDir.isNotBlank()) append("/").append(prefs.remoteDir)
+        val base = prefs.url.trim().trimEnd('/')
+        append("\n远端：").append(base.ifBlank { "未设置" })
+        val dir = prefs.remoteDir.trim().trim('/')
+        if (dir.isNotBlank()) append("/").append(dir)
         if (prefs.lastSyncTime > 0L) {
             append("\n上次：").append(customFormatTimeInDefault("yyyy-MM-dd HH:mm", prefs.lastSyncTime))
             if (prefs.lastSyncResult.isNotBlank()) append("\n结果：").append(prefs.lastSyncResult)

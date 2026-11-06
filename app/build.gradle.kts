@@ -151,6 +151,9 @@ dependencies {
     implementation(files("libs/sherpa-onnx-2.0.1.aar"))
     implementation(libs.kotlinx.coroutines)
     implementation(libs.kotlinx.serialization.json)
+    // WebDAV 需要 PROPFIND / MKCOL，Android 内置 HttpURLConnection 不支持这些动词；
+    // OkHttp 原生支持任意方法（本地缓存已有 4.12.0，离线可构建）。
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation(libs.androidx.activity)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.autofill)
