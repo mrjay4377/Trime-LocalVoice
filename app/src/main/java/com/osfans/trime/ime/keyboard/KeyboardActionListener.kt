@@ -15,6 +15,16 @@ interface KeyboardActionListener {
      */
     fun onPress(keyEventCode: Int)
 
+    /**
+     * Called when the finger leaves a key. This fires for every release, including
+     * the release that ends a long press or a swipe, so press-and-hold actions can
+     * be finished here instead of waiting for a second tap.
+     */
+    fun onRelease(keyEventCode: Int) {}
+
+    /** Called when the touch sequence is cancelled (finger slid away, system interrupt). */
+    fun onCancel() {}
+
     fun onAction(action: KeyAction)
 
     /**

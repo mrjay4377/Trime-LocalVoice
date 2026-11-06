@@ -9,7 +9,19 @@
 -dontobfuscate
 
 # Keep JNI interface
--keep class com.osfans.trime.core.* { *; }
+-keep class com.osfans.trime.core.** { *; }
+
+# 本地离线语音：OfflineSherpaEngine 通过 Class.forName + getDeclaredField/getMethod
+# 反射访问 sherpa-onnx 的类，R8 静态分析看不到引用，必须整体保留（classes.jar 仅 ~0.23 MiB）。
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+-keep class com.osfans.trime.ime.voice.** { *; }
+
+# kotlinx.serialization / kaml 通过注解与生成的 serializer 工作
+-keepattributes Signature, *Annotation*, InnerClasses, EnclosingMethod
+-keepclassmembers class **$$serializer { *; }
+-keepclasseswithmembers class * {
+    kotlinx.serialization.KSerializer serializer(...);
+}
 
 # remove kotlin null checks
 -assumenosideeffects class kotlin.jvm.internal.Intrinsics {

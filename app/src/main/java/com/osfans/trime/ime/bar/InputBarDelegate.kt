@@ -31,6 +31,7 @@ import com.osfans.trime.data.theme.ThemeScope
 import com.osfans.trime.ime.bar.ui.AlwaysUi
 import com.osfans.trime.ime.bar.ui.CandidateUi
 import com.osfans.trime.ime.bar.ui.TabUi
+import com.osfans.trime.ime.bar.ui.VoiceIndicatorUi
 import com.osfans.trime.ime.broadcast.InputBroadcastReceiver
 import com.osfans.trime.ime.candidates.compact.CompactCandidateDelegate
 import com.osfans.trime.ime.candidates.unrolled.window.FlexboxUnrolledCandidateWindow
@@ -183,6 +184,17 @@ class InputBarDelegate(override val di: DI) :
         TabUi(context, scope)
     }
 
+    /** 语音录音状态页：按住语音键时替换候选栏内容。 */
+    private val voiceUi by lazy {
+        VoiceIndicatorUi(context, scope)
+    }
+
+    /** ViewAnimator 的第 4 页（Always=0 / Candidate=1 / Tab=2 / Voice=3）。 */
+    private val voicePageIndex = 3
+
+    private var voiceRecording = false
+    private var savedBarVisibility = View.VISIBLE
+
     private val barStateMachine =
         QuickBarStateMachine.new {
             switchUiByState(it)
@@ -233,6 +245,8 @@ class InputBarDelegate(override val di: DI) :
     }
 
     private fun switchUiByState(state: QuickBarStateMachine.State) {
+        // 录音期间锁定在语音标注页，候选更新不能把它顶掉。
+        if (voiceRecording) return
         val index = state.ordinal
         if (view.displayedChild == index) return
         val new = view.getChildAt(index)
@@ -262,11 +276,36 @@ class InputBarDelegate(override val di: DI) :
             add(alwaysUi.root, lParams(matchParent, matchParent))
             add(candidateUi.root, lParams(matchParent, matchParent))
             add(tabUi.root, lParams(matchParent, matchParent))
+            add(voiceUi.root, lParams(matchParent, matchParent))
 
             evalAlwaysUiState()
             ClipboardHelper.addOnUpdateListener(onClipboardUpdateListener)
             syncToolbarOptionStates()
         }
+    }
+
+    /**
+     * 切换候选栏的「正在录音」标注页。由 CommonKeyboardActionListener 在按下/松手语音键时调用，
+     * 状态机在录音期间被锁定，结束时按真实状态恢复候选栏。
+     */
+    fun setVoiceRecording(active: Boolean) {
+        if (voiceRecording == active) return
+        if (active) {
+            savedBarVisibility = view.visibility
+            voiceRecording = true
+            view.visibility = View.VISIBLE
+            view.displayedChild = voicePageIndex
+        } else {
+            voiceRecording = false
+            switchUiByState(barStateMachine.currentState)
+            view.visibility = savedBarVisibility
+        }
+        voiceUi.setActive(active)
+    }
+
+    /** 录音实时音量：驱动语音标注两侧的波形起伏。 */
+    fun setVoiceLevel(level: Float) {
+        if (voiceRecording) voiceUi.updateLevel(level)
     }
 
     /** Restyles the bar after a scheme switch without rebuilding its views. */
@@ -280,6 +319,7 @@ class InputBarDelegate(override val di: DI) :
             )
         alwaysUi.refreshColors()
         candidateUi.refreshColors()
+        voiceUi.refreshColors()
         // the compact candidate rows live inside candidateUi and re-bind via the delegate
         candidate.refreshColors()
         tabUi.refreshColors()

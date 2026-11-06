@@ -121,6 +121,8 @@ class KeyView(
                 dismissPopupPreview()
             }
             if (keyboard.firstPressedKeyIndex == id) keyboard.firstPressedKeyIndex = -1
+            // 松手统一通知：长按触发的语音输入在这里结束，无需再按一次。
+            keyboardActionListener.onRelease(key.getCode(KeyBehavior.CLICK))
         }
 
         onSwipe = { direction ->
@@ -177,6 +179,7 @@ class KeyView(
             deletedTextBuffer.clear()
             setPressedState(false)
             dismissPopupPreview()
+            keyboardActionListener.onCancel()
         }
     }
 

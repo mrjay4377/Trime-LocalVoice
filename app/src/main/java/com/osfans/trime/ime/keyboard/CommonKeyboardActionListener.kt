@@ -7,6 +7,7 @@ package com.osfans.trime.ime.keyboard
 
 import android.app.Dialog
 import android.content.Intent
+import android.os.SystemClock
 import android.view.ContextThemeWrapper
 import android.view.KeyEvent
 import android.widget.Toast
@@ -22,9 +23,12 @@ import com.osfans.trime.data.theme.ColorManager
 import com.osfans.trime.data.theme.Theme
 import com.osfans.trime.data.theme.ThemeManager
 import com.osfans.trime.data.theme.model.LiquidKeyboard
+import com.osfans.trime.ime.bar.InputBarDelegate
 import com.osfans.trime.ime.clipboard.ClipboardWindow
 import com.osfans.trime.ime.core.TrimeInputMethodService
 import com.osfans.trime.ime.dialog.EnabledSchemaPickerDialog
+import com.osfans.trime.ime.voice.LocalVoiceController
+import com.osfans.trime.ime.voice.LocalVoiceSettings
 import com.osfans.trime.ime.switches.SwitchOptionWindow
 import com.osfans.trime.ime.symbol.LiquidWindow
 import com.osfans.trime.ime.window.BoardWindowManager
@@ -57,6 +61,20 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
     private val liquidWindow: LiquidWindow by instance()
 
     private val prefs = AppPrefs.defaultInstance()
+
+    /** 候选栏：录音时切到「语音标注」页。 */
+    private val inputBarDelegate: InputBarDelegate by instance()
+
+    /** 本地（离线）语音控制器：模型固定从「用户目录 / voice」读取。 */
+    private val voiceController: LocalVoiceController by lazy {
+        LocalVoiceController(service).apply {
+            onRecordingChanged = { active -> inputBarDelegate.setVoiceRecording(active) }
+            onLevelChanged = { level -> inputBarDelegate.setVoiceLevel(level) }
+        }
+    }
+
+    /** 录音起点，用于给「无松手回调」的入口保留再次点击结束的兜底。 */
+    private var voiceStartedAt = 0L
 
     private fun showDialog(dialog: suspend (RimeApi) -> Dialog) {
         rime.launchOnReady { api ->
@@ -116,6 +134,23 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
                     keyPressSound(keyEventCode)
                     keyPressSpeak(keyEventCode)
                 }
+                // 专用语音键：按下即开始录音，候选栏同步出现语音标注。
+                // 本地语音关闭时不在这里处理，交给 onAction 走系统语音输入法，避免切换两次。
+                if (keyEventCode == KeyEvent.KEYCODE_VOICE_ASSIST &&
+                    LocalVoiceSettings.isEnabled(service)
+                ) {
+                    startLocalVoiceInput()
+                }
+            }
+
+            /** 松手结束录音并触发离线识别（长按空格、专用语音键都走这里）。 */
+            override fun onRelease(keyEventCode: Int) {
+                if (voiceController.isActive) voiceController.finish()
+            }
+
+            /** 滑出按键 / 触摸被系统打断时放弃本次录音，不上屏。 */
+            override fun onCancel() {
+                voiceController.cancel()
             }
 
             override fun onAction(action: KeyAction) {
@@ -143,9 +178,43 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
                         KeyEvent.KEYCODE_SETTINGS -> handleSettings(action)
                         KeyEvent.KEYCODE_PROG_RED -> showColorPicker()
                         KeyEvent.KEYCODE_MENU -> showEnabledSchemaPicker()
-                        KeyEvent.KEYCODE_VOICE_ASSIST -> switchToVoiceInputMethod()
+                        KeyEvent.KEYCODE_VOICE_ASSIST -> handleLocalVoiceInput()
                         else -> handleDefaultKeyAction(action)
                     }
+                }
+            }
+
+            /**
+             * 语音键（默认主题里是「长按空格」→ KEYCODE_VOICE_ASSIST）。
+             *
+             * 按住说话：onPress（专用语音键）或长按 onAction 开始录音，候选栏出现语音标注；
+             * KeyView 的 onRelease 在松手时结束并识别，滑出按键则由 onCancel 放弃。
+             * 录音满 2 分钟自动结束。模型放在「用户目录 / voice」，详见设置 → 本地语音识别。
+             * 设置页关闭本地语音后，回退为切换系统语音输入法。
+             */
+            private fun handleLocalVoiceInput() {
+                if (!LocalVoiceSettings.isEnabled(service)) {
+                    switchToVoiceInputMethod()
+                    return
+                }
+                // 正常路径已在录音（onPress 先开始），这里不重复开始；
+                // 只有从没有松手回调的入口（如工具栏动作）再次触发且已录超过 1 秒才手动结束。
+                if (voiceController.isActive) {
+                    if (SystemClock.elapsedRealtime() - voiceStartedAt > 1000L) {
+                        voiceController.finish()
+                    }
+                    return
+                }
+                startLocalVoiceInput()
+            }
+
+            private fun startLocalVoiceInput() {
+                if (voiceController.isActive) return
+                if (voiceController.start()) {
+                    voiceStartedAt = SystemClock.elapsedRealtime()
+                } else {
+                    // 权限/模型缺失导致启动失败时确保标注不会残留。
+                    inputBarDelegate.setVoiceRecording(false)
                 }
             }
 

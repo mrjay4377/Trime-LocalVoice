@@ -69,8 +69,20 @@ android {
         }
         debug {
             applicationIdSuffix = ".debug"
+            // 本地 AAPT2 对部分第三方 AAR 的 PNG/9-patch 资源编译失败，暂时禁用 PNG crunching 绕过
+            isCrunchPngs = false
+            // debug 也做代码收缩：删掉未引用的库类能显著减小 dex；
+            // proguard-rules.pro 里是 -dontobfuscate，类名保持不变，反射调用不会被改名破坏。
+            isMinifyEnabled = true
+            // 同步裁掉未被引用 / 已被代码收缩判定无用的资源（release 同样开启）。
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
 
-            resValue("string", "trime_app_name", "@string/app_name_debug")
+            // 应用名统一用正式名称，不再在桌面 / 输入法列表显示「调试 / 除错模式 / (Debug)」字样。
+            resValue("string", "trime_app_name", "@string/app_name_release")
         }
         all {
             // remove META-INF/version-control-info.textproto
@@ -106,6 +118,12 @@ android {
                     "/kotlin-tooling-metadata.json",
                 )
         }
+        jniLibs {
+            // Java 层只 System.loadLibrary("sherpa-onnx-jni")，该 so 已静态包含 C API 实现
+            // 且 DT_NEEDED 仅为 libonnxruntime.so；c-api / cxx-api 供外部 C/C++ 调用者使用，
+            // 输入法用不到，排除后可少打约 2 MiB。
+            excludes += setOf("**/libsherpa-onnx-c-api.so", "**/libsherpa-onnx-cxx-api.so")
+        }
     }
 }
 
@@ -129,6 +147,8 @@ ksp {
 
 dependencies {
     ksp(project(":codegen"))
+    // 本地语音输入（Qwen3-ASR 等）：sherpa-onnx 本地推理引擎（Apache-2.0，来自 BiBi-Keyboard）
+    implementation(files("libs/sherpa-onnx-2.0.1.aar"))
     implementation(libs.kotlinx.coroutines)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.activity)

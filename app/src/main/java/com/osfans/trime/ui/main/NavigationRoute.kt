@@ -15,6 +15,7 @@ import com.osfans.trime.ui.main.settings.CandidatesSettingsFragment
 import com.osfans.trime.ui.main.settings.ClipboardSettingsFragment
 import com.osfans.trime.ui.main.settings.GeneralSettingsFragment
 import com.osfans.trime.ui.main.settings.KeyboardSettingsFragment
+import com.osfans.trime.ui.main.settings.LocalAsrSettingsFragment
 import com.osfans.trime.ui.main.settings.ProfileSettingsFragment
 import com.osfans.trime.ui.main.settings.schema.SchemaListFragment
 import com.osfans.trime.ui.main.settings.theme.ThemeSettingsFragment
@@ -51,6 +52,9 @@ sealed class NavigationRoute : Parcelable {
 
     @Serializable
     data object Clipboard : NavigationRoute()
+
+    @Serializable
+    data object LocalAsr : NavigationRoute()
 
     @Serializable
     data object Advanced : NavigationRoute()
@@ -96,6 +100,9 @@ sealed class NavigationRoute : Parcelable {
             }
             fragment<ClipboardSettingsFragment, Clipboard> {
                 label = ctx.getString(R.string.clipboard)
+            }
+            fragment<LocalAsrSettingsFragment, LocalAsr> {
+                label = ctx.getString(R.string.local_asr_settings)
             }
             fragment<AdvancedSettingsFragment, Advanced> {
                 label = ctx.getString(R.string.advanced)

@@ -8,7 +8,7 @@
 <resources xmlns:xliff="urn:oasis:names:en:xliff:document:1.2">
     <!-- Input Method Platform Tittle  -->
     <string name="app_name_release">Trime</string>
-    <string name="app_name_debug">Trime (Debug)</string>
+    <string name="app_name_debug">Trime</string>
     <!-- Preference settings -->
     <string name="qq_group_1">Trime QQ group 1</string>
     <string name="qq_group_2">Trime QQ group 2</string>
@@ -251,4 +251,49 @@
     <string name="word_segment">Word segment</string>
     <string name="star_success">Star success</string>
     <string name="ignore_system_gesture_insets">Ignore system gesture insets</string>
+
+    <!-- 本地离线语音识别设置 -->
+    <string name="local_asr_settings">本地语音识别</string>
+    <string name="local_asr_enabled">启用本地语音识别</string>
+    <string name="local_asr_enabled_summary">开启后语音键使用本地模型识别；关闭则改为切换系统语音输入法。识别全程在设备本地完成，不联网</string>
+    <string name="local_asr_vendor">本地识别引擎与模型</string>
+    <string name="local_asr_vendor_summary">点击选择具体模型；已安装的可直接使用，未安装的会提示下载并自动安装</string>
+    <string name="local_asr_model_installed">已安装</string>
+    <string name="local_asr_model_not_installed">可下载</string>
+    <string name="local_asr_permission">麦克风权限</string>
+    <string name="local_asr_permission_granted">已授权，可以录音（点击无需操作）</string>
+    <string name="local_asr_permission_denied">未授权，点击此处申请麦克风权限</string>
+    <string name="local_asr_model_status">模型状态</string>
+    <string name="local_asr_model_ready">已检测到完整模型，可以开始识别</string>
+    <string name="local_asr_model_missing">尚未检测到完整模型，可在下方「模型下载与管理」中一键安装，或手动放到 voice 目录</string>
+    <string name="local_asr_model_unknown">模型状态检查失败，请确认 voice 目录可访问</string>
+    <string name="local_asr_threads">推理线程数</string>
+    <string name="local_asr_threads_summary">线程越多越快，但占用内存与电量也更高</string>
+    <string name="local_asr_itn">启用 ITN（逆文本归一化）</string>
+    <string name="local_asr_itn_summary">把口语数字、日期等转成规范写法（如「一二三」→「123」）。仅对 SenseVoice、FunASR Nano 等支持 ITN 的模型生效</string>
+    <string name="local_asr_models">模型下载与管理</string>
+    <string name="local_asr_models_summary">查看全部可下载模型，一键下载、解压、校验并自动安装到 voice 目录；识别过程不联网</string>
+    <string name="local_asr_source">模型下载源</string>
+    <string name="local_asr_source_summary">国内网络若 GitHub 官方不通可改用镜像；自动模式会依次尝试全部可用源</string>
+    <string name="local_asr_download_confirm">%1$s\n下载约 %2$d MiB，将自动解压、校验并安装到 voice 目录。建议在 Wi-Fi 下进行。</string>
+    <string name="local_asr_install_title">正在安装模型</string>
+    <string name="local_asr_install_done">模型安装完成</string>
+    <string name="local_asr_install_done_msg">%1$s 已安装并设为当前语音模型。\n\n安装位置：\n%2$s\n\n这是应用私有外部目录（Android/data/…/files/rime/voice），部分文件管理器看得到、部分看不到；可点「复制路径」用 adb 或文件管理器查看。回到输入框长按空格即可说话，首次识别需要加载模型。</string>
+    <string name="local_asr_install_failed">模型安装未完成</string>
+    <string name="local_asr_install_failed_msg">原因：%1$s\n\n预期安装目录：\n%2$s\n\n若提示校验/缺文件，可切换下载源重试，或手动把模型包解压到该 voice 目录。voice 根目录里的 installed.txt 会列出已安装模型。</string>
+    <string name="local_asr_copy_path">复制路径</string>
+    <string name="local_asr_path_copied">已复制路径：%1$s</string>
+    <string name="local_asr_tap_copy_path">（点击本项可复制该目录的绝对路径）</string>
+    <string name="local_asr_install_cancelled">已取消，未完成安装</string>
+    <string name="local_asr_model_actions">模型已安装：%1$s</string>
+    <string name="local_asr_model_dir">安装目录：\n%1$s</string>
+    <string name="local_asr_model_set_current">设为当前模型</string>
+    <string name="local_asr_model_delete">删除模型文件</string>
+    <string name="local_asr_model_deleted">已删除模型文件</string>
+    <string name="local_asr_progress">%1$s %2$d%%\n%3$s</string>
+    <string name="local_asr_save_recording">保存最近一次录音</string>
+    <string name="local_asr_save_recording_summary">把录音保存为 voice/last_recording.wav（16kHz 单声道），便于排查</string>
+    <string name="local_asr_usage">使用方式</string>
+    <string name="local_asr_usage_summary">按住语音键（默认长按空格）开始录音，候选栏显示麦克风标注；松手即结束并识别上屏，滑出按键可取消；满 2 分钟自动结束。首次使用需授予麦克风权限，并在「模型下载与管理」中安装本地模型（APK 不含模型，识别过程不联网）</string>
+    <string name="local_asr_model_root">模型目录：%1$s</string>
 </resources>

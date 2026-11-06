@@ -41,6 +41,9 @@ object UserDataManager {
 
     private const val DEFAULT_CUSTOM_FILE_NAME = "default.custom.yaml"
 
+    /** 本地语音模型目录，只放在应用私有目录，不参与使用者资料夹的双向镜像。 */
+    private const val VOICE_DIR_NAME = "voice"
+
     private const val SCHEMA_LIST_CUSTOM_PATCH = """
       patch:
         schema_list:
@@ -172,18 +175,24 @@ object UserDataManager {
 
             val remoteMap = buildMap {
                 StorageAccess.walk(externalRimeDir)
-                    .collect { put(it.relativePath, it.file) }
+                    .collect { if (!isVoicePath(it.relativePath)) put(it.relativePath, it.file) }
             }
             val localMap = walkLocal(userDataDir)
 
-            val allPaths = (localMap.keys + remoteMap.keys + oldManifest.files.keys)
+            // voice 里是几百 MB 甚至上 GB 的离线模型，固定只放在应用私有目录：
+            // 若纳入使用者资料夹的双向镜像，每次部署都要对整套模型做 SHA-256 并在
+            // 两侧复制，界面会长时间停在部署中；外部资料夹没有 voice 时还会被判成
+            // 「本地删除」，反过来把已安装的模型删掉。
+            val trackedPaths = oldManifest.files.keys.filterNot { isVoicePath(it) }.toSet()
+            val allPaths = (localMap.keys + remoteMap.keys + trackedPaths)
+                .filterNot { isVoicePath(it) }
                 .sortedBy { it.count { c -> c == '/' } }
 
             // Fast path: when every path still matches the recorded state on both sides and no
             // path was added or removed, the prospective manifest equals the stored one. Reusing
             // the recorded hashes lets us fingerprint it and compare with the stored sha256
             // before doing any I/O or rewriting the manifest.
-            if (allPaths.size == oldManifest.files.size) {
+            if (allPaths.size == trackedPaths.size) {
                 val preview = buildMap {
                     for (p in allPaths) {
                         val entry = oldManifest.files[p]
@@ -193,7 +202,7 @@ object UserDataManager {
                         put(p, entry)
                     }
                 }
-                if (preview.size == oldManifest.files.size &&
+                if (preview.size == trackedPaths.size &&
                     createSyncManifest(preview).sha256 == oldManifest.sha256
                 ) {
                     Timber.d("No changes detected, skipping sync")
@@ -428,9 +437,13 @@ object UserDataManager {
         if (!root.exists()) return emptyMap()
         return root
             .walkTopDown()
+            .onEnter { dir -> dir == root || dir.name != VOICE_DIR_NAME }
             .filter { it != root }
             .associateBy { it.toRelativeString(root) }
     }
+
+    private fun isVoicePath(path: String): Boolean =
+        path == VOICE_DIR_NAME || path.startsWith("$VOICE_DIR_NAME/")
 
     private fun isUnchanged(
         path: String,
