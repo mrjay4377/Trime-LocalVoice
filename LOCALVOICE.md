@@ -103,3 +103,19 @@ git config --local http.version HTTP/1.1
 
 它们只影响本机编译，提交会污染 fork 并在合并上游时造成大面积冲突。Windows 上建议开启开发者模式后
 `git config core.symlinks true` 并重新 checkout，让 symlink 恢复正常。
+
+## 二进制依赖（v29 起随仓库提供，异地 clone 可直接编译）
+
+| 文件 | 用途 | 来源 / 许可 |
+| --- | --- | --- |
+| `app/libs/sherpa-onnx-2.0.1.aar` | 本地 ASR 推理引擎 | k2-fsa / BiBi-Keyboard，Apache-2.0 |
+| `app/libs/foxlet-v0.5.0.aar`、`app/libs/foxlet-0.5.0-classes.jar` | 离线翻译 SDK | yinvoke/foxlet-translate，MIT |
+| `app/src/main/jniLibs/arm64-v8a/libfoxlet.so`、`libc++_shared.so` | 翻译引擎 native 库（仅 arm64） | 同上 |
+
+宿主 `minSdk = 21`，而 Foxlet AAR 声明 `minSdk 28`，因此**不使用 AAR 依赖**，只取 `classes.jar` + arm64 `.so`；
+运行时由 `OfflineTranslator.isAvailable()` 判断 Android 9+ 且存在 native 库才启用，老设备自动关闭翻译选项。
+`app/proguard-rules.pro` 末尾的 `NativeBridge` / `JniRuntime` keep 规则必须保留，否则 R8 会破坏 JNI 反射面。
+
+翻译模型**不随仓库分发**：Mozilla Firefox Translations 模型（MPL-2.0）由 Foxlet 在应用内下载到
+`noBackupFilesDir/translation-models`，首次使用需联网，之后翻译全程离线。中→英约 52 MiB；
+中文到其它语种走 `zh-Hans → en → 目标语` pivot，需要两套语言包。
