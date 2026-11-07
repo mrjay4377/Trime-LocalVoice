@@ -226,9 +226,25 @@ private class OnlineSession(private val recognizer: Any) {
         accept.invoke(stream, samples, sampleRate)
     }
 
-    /** 松手后通知引擎音频结束，把尾部缓存的特征一次解码完。 */
-    fun finishInput() {
+    /** 通知引擎音频结束。 */
+    private fun finishInput() {
         inputFinished?.let { runCatching { it.invoke(stream) } }
+    }
+
+    /**
+     * 松手收尾：流式 Zipformer 按 chunk 消费特征（X-ASR 是 480ms），最后不足一个 chunk
+     * 的语音会一直留在特征提取器里。sherpa-onnx 官方示例在最后一块音频后都要补 0.3~0.6s
+     * 静音 padding，再 inputFinished() 把尾帧 flush 出来逐次 decode；少了这一步，
+     * 表现就是「说完了松手，最后几个字没识别到」。
+     */
+    fun finalizeInput() {
+        val sampleRate = AudioRecorder.SAMPLE_RATE
+        // 1) 补静音凑满最后一个特征块，先把它解掉。
+        runCatching { acceptWaveform(FloatArray(sampleRate * 3 / 5), sampleRate) }
+        decodeReady()
+        // 2) 通知音频结束，native 会把剩余缓存帧补齐；再解到 isReady 为 false。
+        finishInput()
+        decodeReady()
     }
 
     fun decodeReady() {
@@ -303,8 +319,9 @@ class StreamingSherpaEngine(
             sherpaTrySetField(config, "modelConfig", modelConfig)
             sherpaTrySetField(config, "decodingMethod", "greedy_search")
             sherpaTrySetField(config, "maxActivePaths", 4)
-            sherpaTrySetField(config, "enableEndpoint", true)
-            // endpointConfig 使用库内置的三条默认规则，不显式构造 EndpointRule。
+            // 会话结束完全由「松手」决定，不用端点检测：一旦 native 在尾部静音处判定
+            // endpoint 并重置流，已解码的文字会被清掉，反而丢字。
+            sherpaTrySetField(config, "enableEndpoint", false)
             return config to fingerprint(context, model)
         }
 
@@ -328,6 +345,7 @@ class StreamingSherpaEngine(
     private var session: OnlineSession? = null
 
     private var lastPartial = ""
+    private var bestText = ""
     private var totalBytes = 0
 
     override val isRunning: Boolean get() = running.get()
@@ -340,6 +358,7 @@ class StreamingSherpaEngine(
         }
         running.set(true)
         lastPartial = ""
+        bestText = ""
         totalBytes = 0
         worker = scope.launch(Dispatchers.IO) {
             var online: OnlineSession? = null
@@ -362,6 +381,7 @@ class StreamingSherpaEngine(
                     s.acceptWaveform(toFloatArray(chunk), AudioRecorder.SAMPLE_RATE)
                     s.decodeReady()
                     val text = s.text().trim()
+                    if (text.length > bestText.length) bestText = text
                     if (text != lastPartial) {
                         lastPartial = text
                         listener.onPartial(text)
@@ -372,10 +392,16 @@ class StreamingSherpaEngine(
                     listener.onError("录音太短，请按住语音键说完再松手")
                     return@launch
                 }
-                s.finishInput()
-                s.decodeReady()
-                val finalText = sanitize(s.text())
-                Timber.i("streaming asr done: %.1fs audio, %d chars", totalBytes / 32000f, finalText.length)
+                // 关键：补尾部静音 + inputFinished + 解完所有剩余帧，否则最后半秒语音会丢。
+                s.finalizeInput()
+                var finalText = sanitize(s.text())
+                // 兜底：个别 ROM / 模型在 inputFinished 后返回空结果时，用之前最长的中间结果上屏，
+                // 不至于整段白说。正常情况下 getResult 是累积文本，不会走到这里。
+                if (finalText.isBlank()) finalText = sanitize(bestText)
+                Timber.i(
+                    "streaming asr done: %.1fs audio, %d chars (best %d)",
+                    totalBytes / 32000f, finalText.length, bestText.length,
+                )
                 listener.onFinal(finalText)
             } catch (t: CancellationException) {
                 throw t
@@ -391,14 +417,16 @@ class StreamingSherpaEngine(
     }
 
     override fun feed(pcm: ByteArray) {
-        if (running.get()) channel.trySend(pcm)
+        // 不再用 running 做门闩：松手瞬间录音线程可能还剩最后一块 PCM 未投递，
+        // 先关 running 会把这一块丢掉。队列关闭后 trySend 只会返回失败，不会抛异常。
+        runCatching { channel.trySend(pcm) }
     }
 
-    /** 松手：关闭队列，worker 处理完剩余 PCM 后直接给出最终文本。 */
+    /** 松手：先关队列再改状态，保证已投递的 PCM 全部被 worker 排空后才做尾部收尾。 */
     override fun stop() {
         if (!running.get()) return
-        running.set(false)
         channel.close()
+        running.set(false)
     }
 
     override fun cancel() {

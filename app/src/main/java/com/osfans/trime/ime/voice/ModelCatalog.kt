@@ -214,6 +214,24 @@ object ModelCatalog {
     /** 官方原始地址，供「手动下载」展示与复制。 */
     fun officialUrl(variant: ModelVariant): String = RELEASE_BASE + variant.zipName
 
+    /**
+     * 「手动下载」逐源复制用：返回 (源名称, 该源的完整下载地址)。
+     * 官方 + 三个主镜像 + 自动模式的两个备用镜像，地址去重后按官方 → 镜像排序。
+     * 点某一项就复制那一项的地址，不用再从一大段文字里找 URL。
+     */
+    fun sourceUrls(variant: ModelVariant): List<Pair<String, String>> {
+        val official = officialUrl(variant)
+        val rows = mutableListOf(SOURCES[1] to official)
+        PREFIXES.drop(2).forEachIndexed { index, prefix ->
+            rows += SOURCES[index + 2] to (prefix + official)
+        }
+        EXTRA_MIRRORS.forEachIndexed { index, prefix ->
+            val host = prefix.removePrefix("https://").trimEnd('/')
+            rows += "备用镜像 ${index + 1} · $host" to (prefix + official)
+        }
+        return rows.distinctBy { it.second }
+    }
+
     fun byId(id: String): ModelVariant? = VARIANTS.firstOrNull { it.id == id }
 
     fun variantsOf(familyId: String): List<ModelVariant> = VARIANTS.filter { it.familyId == familyId }

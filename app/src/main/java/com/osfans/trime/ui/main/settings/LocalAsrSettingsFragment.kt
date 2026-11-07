@@ -568,12 +568,11 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     }
 
     /**
-     * 「识别引擎与模型」弹窗的分组数据：本地语音包置顶，其后是已下载规格，
-     * 再按引擎家族分组列出可下载模型；每项只显示短标题 + 一行大小/状态。
+     * 「语音识别引擎」只列 voice 目录里真实存在的模型：手动放置 / ZIP 导入的本地包置顶，
+     * 其后是已下载安装的规格模型。未安装的可下载模型统一放到「下载并安装模型」里，
+     * 避免选择引擎时混进一堆点了只会触发下载的项。
      */
     private fun engineRows(ctx: Context): List<EngineRow> {
-        val installed = getString(R.string.local_asr_model_installed)
-        val notInstalled = getString(R.string.local_asr_model_not_installed)
         val rows = mutableListOf<EngineRow>()
         val manual = manualPackages(ctx)
         if (manual.isNotEmpty()) {
@@ -590,28 +589,18 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             .filter { ModelInstaller.isInstalled(ctx, it) }
             .sortedWith(compareBy({ it.familyLabel }, { it.downloadMiB }))
         if (ready.isNotEmpty()) {
-            rows += EngineRow.Header("已安装 · 点击设为当前")
+            rows += EngineRow.Header("已安装模型 · 点击设为当前")
             ready.forEach { v ->
                 rows += EngineRow.Option(
                     "${v.familyId}|${v.key}",
                     "${v.familyLabel} · ${v.label}",
-                    "${v.downloadMiB} MiB · $installed",
+                    "约 ${v.downloadMiB} MiB · " +
+                        displayPath(ctx, ModelInstaller.installedDir(ctx, v).absolutePath),
                 )
             }
         }
-        VoiceModels.FAMILIES.forEach { family ->
-            rows += EngineRow.Header(family.label.substringBefore("（"))
-            rows += EngineRow.Option("${family.id}|", "自动选择", "使用本引擎下已放置的模型")
-            ModelCatalog.variantsOf(family.id)
-                .filterNot { ModelInstaller.isInstalled(ctx, it) }
-                .sortedBy { it.downloadMiB }
-                .forEach { v ->
-                    rows += EngineRow.Option(
-                        "${v.familyId}|${v.key}",
-                        v.label,
-                        "${v.downloadMiB} MiB · $notInstalled · 点击下载",
-                    )
-                }
+        if (rows.none { it is EngineRow.Option }) {
+            rows += EngineRow.Header("暂无已安装模型 · 请先在「下载并安装模型」里安装")
         }
         return rows
     }
@@ -651,7 +640,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         }
     }
 
-    /** 自定义单选弹窗：分组标题不可点，选项两行文字 + 单选标记。 */
+    /** 自定义单选弹窗：只列已安装模型，分组标题不可点，选项两行文字 + 单选标记。 */
     private fun showEnginePicker(ctx: Context) {
         val rows = engineRows(ctx)
         val family = LocalVoiceSettings.vendor(ctx)
@@ -668,6 +657,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 dialog.dismiss()
                 onEngineSelected(ctx, row.value)
             }
+            .setPositiveButton("下载模型") { _, _ -> showModelManager(ctx) }
             .setNeutralButton("删除模型") { _, _ -> showDeleteModels(ctx) }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -1025,6 +1015,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         val original = LocalVoiceSettings.downloadSource(ctx)
         AlertDialog.Builder(ctx)
             .setTitle(getString(R.string.local_asr_source))
+            .setMessage("点选即切换下载源；「模型地址」里可点某个源直接复制该源地址。")
             .setSingleChoiceItems(ModelCatalog.SOURCES.toTypedArray(), original) { _, which ->
                 LocalVoiceSettings.setDownloadSource(ctx, which)
             }
@@ -1040,7 +1031,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             .show()
     }
 
-    /** 手动下载：先选模型，再展示官方地址与当前源 / 备用镜像地址，可一键复制。 */
+    /** 手动下载：先选模型，再列出全部下载源；点击某个源直接复制该源地址。 */
     private fun showManualDownload(ctx: Context) {
         val variants = ModelCatalog.VARIANTS
         AlertDialog.Builder(ctx)
@@ -1052,28 +1043,27 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             .show()
     }
 
+    /** 点哪个源就复制哪个源的完整地址，不再需要「复制当前源 / 复制官方」两个按钮。 */
     private fun showDownloadUrls(ctx: Context, variant: ModelVariant) {
         val source = LocalVoiceSettings.downloadSource(ctx)
-        val urls = ModelCatalog.candidateUrls(variant, source)
-        val official = ModelCatalog.officialUrl(variant)
+        val sources = ModelCatalog.sourceUrls(variant)
         val message = buildString {
             appendLine(variant.displayName)
             appendLine("文件名：${variant.zipName}")
             appendLine("大小：约 ${variant.downloadMiB} MiB")
             appendLine("当前下载源：${ModelCatalog.SOURCES[source]}")
             appendLine()
-            urls.forEachIndexed { index, url ->
-                appendLine(if (index == 0) "当前源：" else "备用源 $index：")
-                appendLine(url)
-                appendLine()
-            }
-            appendLine("下载好 ZIP 后，回到本页用「从本地导入模型（ZIP）」安装即可。")
+            appendLine("点击下面的下载源即复制该源地址。下载好 ZIP 后，用「从本地导入模型（ZIP）」安装。")
         }
+        val rows = sources.map { (label, url) -> EngineRow.Option(url, label, url) }
         AlertDialog.Builder(ctx)
-            .setTitle("模型下载地址")
+            .setTitle("模型下载地址 · 点击源即复制")
             .setMessage(message)
-            .setPositiveButton("复制当前源地址") { _, _ -> copyUrl(ctx, urls.first()) }
-            .setNeutralButton("复制官方地址") { _, _ -> copyUrl(ctx, official) }
+            .setAdapter(engineAdapter(ctx, rows, current = "", showRadio = false)) { dialog, which ->
+                val row = rows.getOrNull(which) ?: return@setAdapter
+                dialog.dismiss()
+                copyUrl(ctx, row.value)
+            }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
@@ -1323,7 +1313,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         }
 
         val source = LocalVoiceSettings.downloadSource(ctx)
-        sourcePreference?.summary = "当前：${ModelCatalog.SOURCES[source]}\n点击切换下载源或复制模型地址"
+        sourcePreference?.summary = "当前：${ModelCatalog.SOURCES[source]}\n点击切换下载源 / 复制某个源地址"
 
         val present = ModelInstaller.installedModels(ctx)
         modelsPreference?.apply {
@@ -1356,7 +1346,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             key.isNotBlank() -> "$familyLabel · 本地语音包 $key"
             else -> "$familyLabel · 自动选择"
         }
-        return "当前：$current\n点击选择引擎 / 具体模型"
+        return "当前：$current\n点击选择已安装的语音模型"
     }
 
     /** 列表里只留两行状态；完整路径与缺件说明放到详情弹窗。 */

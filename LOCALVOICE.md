@@ -155,7 +155,7 @@ v30 新增第 7 个引擎家族 `streaming_xasr`，走同一份 AAR 里现成的
 - 也支持手动放置 / ZIP 导入：任意 sherpa-onnx streaming Transducer 模型，把
   `encoder*.onnx` / `decoder*.onnx` / `joiner*.onnx` / `tokens.txt` 放进
   `voice/streaming_xasr/` 下的任意子目录即可，`VoiceModels` 会按别名扫描。
-- 设置 → 本地语音识别 → 识别引擎与模型 → 选「流式识别」；模型按「模型下载与管理」安装。
+- 设置 → 本地语音识别 → 语音识别引擎 → 选「流式识别」；模型按「下载并安装模型 / 本地语音包」安装。
 - 流式模型与离线模型**不通用**，切换引擎后需各自安装一次；`voice/` 仍不参与资料夹同步。
 
 已知限制：X-ASR 480ms 包的 encoder 是 fp32，首次加载与内存占用明显高于 SenseVoice int8；
@@ -192,3 +192,18 @@ python scripts/repack_apk.py "$APK" ../Trime-LocalVoice-v31-arm64-v8a.apk
 （约 128 MiB，int8，体积和内存约为现用 fp32 包的 1/4），可进一步缩短首次加载并降低耗电。
 但官方只发 `tar.bz2`，需要让安装器支持 bzip2 + tar（引入 commons-compress）才能一键下载；
 当前可先手动解压后放进 `voice/streaming_xasr/` 使用。
+
+## v32：引擎列表精简、流式尾部丢字修复、下载源点选复制
+
+| 问题 | 处理 |
+| --- | --- |
+| 「识别引擎与模型」改名并只显示已安装 | 标题改为「语音识别引擎」；弹窗只列 voice 目录里真实存在的本地语音包（手动放置 / ZIP 导入）和已下载安装的规格模型，不再混入未安装的可下载项与「自动选择」。没有模型时给出提示，并提供「下载模型」按钮直达选择列表 |
+| 流式松手后最后几个字没识别到 | 根因是流式 Zipformer 按 chunk（X-ASR 为 480ms）消费特征，最后不足一个 chunk 的音频一直留在特征提取器里。`OnlineSession.finalizeInput()` 现在按 sherpa-onnx 官方示例补 0.6s 静音 padding → `decodeReady()` → `inputFinished()` → 再 `decodeReady()` 把尾帧解完；同时把 `enableEndpoint` 设为 false，避免端点判定重置已解码结果。另外 `stop()` 改为先关队列再改状态、`feed()` 不再用 `running` 做门闩，松手瞬间最后一块 PCM 不会被丢掉；保留最长中间结果作为空结果兜底 |
+| 手动下载地址复制 | `ModelCatalog.sourceUrls()` 返回「源名称 → 完整地址」列表，手动下载的源列表用两行项展示，**点哪个源就复制哪个源的地址**（官方 / 3 个主镜像 / 2 个备用镜像），不再需要「复制当前源 / 复制官方」两个按钮 |
+
+流式收尾顺序（与官方 `decode-file` 示例一致）：
+
+```text
+最后一块 PCM → acceptWaveform(0.6s 静音) → while isReady: decode
+            → inputFinished()          → while isReady: decode → getResult()
+```
