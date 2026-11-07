@@ -53,10 +53,16 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
     /** 实时音量（0..1），驱动候选栏两侧的波形起伏；回调在主线程执行。 */
     var onLevelChanged: ((Float) -> Unit)? = null
 
+    /** 流式引擎的中间识别结果，显示在候选栏语音栏；回调在主线程执行。 */
+    var onPartialText: ((String) -> Unit)? = null
+
     private fun publishRecording(active: Boolean) {
         if (recording == active) return
         recording = active
-        if (!active) main.post { onLevelChanged?.invoke(0f) }
+        if (!active) main.post {
+            onLevelChanged?.invoke(0f)
+            onPartialText?.invoke("")
+        }
         main.post { onRecordingChanged?.invoke(active) }
     }
 
@@ -84,7 +90,10 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
     fun start(): Boolean {
         cancel()
         publishRecording(false)
-        main.post { onLevelChanged?.invoke(0f) }
+        main.post {
+            onLevelChanged?.invoke(0f)
+            onPartialText?.invoke("")
+        }
         if (!LocalVoiceSettings.isEnabled(service)) {
             notice("请在设置 → 本地语音识别中启用语音输入")
             return false
@@ -164,6 +173,14 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
                 }
             }
 
+            /** 原生流式引擎：边说边把中间结果送到候选栏语音栏，松手后仍走 onFinal 上屏。 */
+            override fun onPartial(text: String) {
+                main.post {
+                    if (current !== session || session.finished || !recording) return@post
+                    onPartialText?.invoke(text)
+                }
+            }
+
             override fun onError(message: String) {
                 main.post {
                     if (current !== session || session.finished) return@post
@@ -174,14 +191,25 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
             }
         }
 
-        val engine = OfflineSherpaEngine(
-            context = service,
-            scope = scope,
-            listener = listener,
-            familyId = familyId,
-            model = model,
-            onLoadStart = { notice("正在加载本地模型，首次加载可能较慢…") },
-        )
+        // 流式家族用 OnlineRecognizer 增量解码；其余家族保持松手后整段推理。
+        val engine: AsrEngine = if (VoiceModels.isStreaming(familyId)) {
+            StreamingSherpaEngine(
+                context = service,
+                scope = scope,
+                listener = listener,
+                model = model,
+                onLoadStart = { notice("正在加载流式模型，首次加载可能较慢…") },
+            )
+        } else {
+            OfflineSherpaEngine(
+                context = service,
+                scope = scope,
+                listener = listener,
+                familyId = familyId,
+                model = model,
+                onLoadStart = { notice("正在加载本地模型，首次加载可能较慢…") },
+            )
+        }
         session.engine = engine
         engine.start()
         if (!engine.isRunning) return false
@@ -243,8 +271,11 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
                 session.peakLevel,
             )
             if (current === session && !session.finished) {
-                // 大模型首次加载可能要几十秒，给一个明确反馈，避免看起来「松手没反应」。
-                notice("正在本地识别（%.1f 秒录音）…".format(session.seconds))
+                // 流式引擎录音期间已实时出字，松手后几乎立即可上屏，不再闪一条提示；
+                // 离线整段推理可能要几十秒，仍需明确反馈避免看起来「松手没反应」。
+                if (!VoiceModels.isStreaming(session.familyId)) {
+                    notice("正在本地识别（%.1f 秒录音）…".format(session.seconds))
+                }
                 withContext(Dispatchers.Main) {
                     if (current === session && !session.finished) session.engine?.stop()
                 }
@@ -279,6 +310,7 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
 
     private fun cleanup(session: Session) {
         publishRecording(false)
+        main.post { onPartialText?.invoke("") }
         session.finished = true
         session.watchdog?.cancel()
         session.timeoutJob?.cancel()

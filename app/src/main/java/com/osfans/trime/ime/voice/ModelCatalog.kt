@@ -193,6 +193,22 @@ object ModelCatalog {
                 spec("model.int8.onnx", 340_990_949L, ""),
             ),
         ),
+        // 原生流式 Transducer（X-ASR 480ms chunk）。包内文件名带 -480ms 后缀，
+        // 大小取自 release 包中央目录实测；上游未提供 SHA-256，按「同名 + 大小一致」校验。
+        // 该包 encoder 为 fp32，故体积偏大；代价是按住语音键就能逐块出字，无需等松手。
+        ModelVariant(
+            familyId = VoiceModels.STREAMING_FAMILY,
+            key = "480ms-zh-en",
+            label = "X-ASR 480ms（中英，边说边出字）",
+            zipName = "sherpa-onnx-streaming-x-asr-480ms-zh-en.zip",
+            downloadMiB = 529,
+            files = listOf(
+                spec("tokens.txt", 58_806L, ""),
+                spec("encoder-480ms.onnx", 592_968_361L, ""),
+                spec("decoder-480ms.onnx", 11_309_084L, ""),
+                spec("joiner-480ms.onnx", 10_260_467L, ""),
+            ),
+        ),
     )
 
     /** 官方原始地址，供「手动下载」展示与复制。 */

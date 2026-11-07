@@ -22,8 +22,8 @@
 
 ## 本分支改动范围
 
-- `app/src/main/java/com/osfans/trime/ime/voice/`：本地离线 ASR 全套（sherpa-onnx 反射封装、录音、模型目录 / 下载 / 安装 / ZIP 导入、ITN）
-- `LocalAsrSettingsFragment.kt`、`VoiceIndicatorUi.kt`：设置页与候选栏语音标注 / 音量波形
+- `app/src/main/java/com/osfans/trime/ime/voice/`：本地离线 ASR 全套（离线整段 + 原生流式双引擎、sherpa-onnx 反射封装、录音、模型目录 / 下载 / 安装 / ZIP 导入、ITN）
+- `LocalAsrSettingsFragment.kt`、`VoiceIndicatorUi.kt`：设置页与候选栏语音标注 / 音量波形 / 流式实时文字
 - `KeyboardActionListener` / `KeyView` / `CommonKeyboardActionListener` / `InputBarDelegate` 链路：按住录音、松手结束
 - `UserDataManager.kt`：**把 `voice/` 排除出 Rime 双向同步**（否则大模型会被同步拖慢或误删）
 - `AndroidManifest.xml`（`RECORD_AUDIO` / `INTERNET`）、`proguard-rules.pro`（反射 keep）、三组 `strings.xml`、`ic_voice_mic.xml`
@@ -119,3 +119,45 @@ git config --local http.version HTTP/1.1
 翻译模型**不随仓库分发**：Mozilla Firefox Translations 模型（MPL-2.0）由 Foxlet 在应用内下载到
 `noBackupFilesDir/translation-models`，首次使用需联网，之后翻译全程离线。中→英约 52 MiB；
 中文到其它语种走 `zh-Hans → en → 目标语` pivot，需要两套语言包。
+
+## v30：原生流式离线识别（边说边出字）
+
+之前所有模型都走 `OfflineRecognizer`：按住只累积 PCM，松手对整段音频推理一次。
+v30 新增第 7 个引擎家族 `streaming_xasr`，走同一份 AAR 里现成的 `OnlineRecognizer`
+（sherpa-onnx 2.0.1 的 `classes.jar` 已含 `OnlineRecognizer` / `OnlineStream` /
+`OnlineRecognizerConfig` / `OnlineTransducerModelConfig` / `EndpointConfig`，**无需新增依赖或 so**）。
+
+| | 流式引擎 | 其余 6 个引擎 |
+| --- | --- | --- |
+| 解码 | `acceptWaveform` 逐块增量解码 | 松手后整段一次推理 |
+| 反馈 | 候选栏语音栏实时显示中间文字 | 松手后提示「正在本地识别」 |
+| 上屏延迟 | 松手即出结果 | 取决于模型大小，可能数秒~数十秒 |
+| 模型 | encoder / decoder / joiner / tokens（Transducer） | 各家离线模型，互不通用 |
+| 代价 | 模型 590 MB（fp32 encoder），内存占用高 | SenseVoice int8 仅约 240 MB |
+
+实现要点：
+
+- `StreamingSherpaEngine.kt`：`Channel<ByteArray>` 把录音 PCM 投给单个 IO worker，串行调用
+  `acceptWaveform` → `isReady/decode` → `getResult`，中间文本经 `AsrListener.onPartial` 送到
+  `VoiceIndicatorUi.updatePartial()` 显示在语音栏；松手 `inputFinished()` 收尾并立即 `onFinal`。
+- `SherpaOnlineManager`：会话间复用识别器（首次加载 590 MB 很慢），与离线缓存共用
+  「跟随键盘」预加载 / 延迟卸载，切换引擎、删除模型、服务销毁时都会释放。
+- `LocalVoiceController` 按 `VoiceModels.isStreaming()` 选引擎；简繁转换、离线翻译、
+  WebDAV 同步排除 `voice/`、上屏重试等链路完全复用，未改动。
+- `app/proguard-rules.pro` 原有 `-keep class com.k2fsa.sherpa.onnx.** { *; }` 已覆盖
+  `Online*` 反射面，无需新增规则。
+
+模型与安装：
+
+- 一键下载：`sherpa-onnx-streaming-x-asr-480ms-zh-en.zip`（约 529 MiB，来自 BiBi-Keyboard
+  `models` release），解压后为 `encoder-480ms.onnx`（592,968,361 B）、`decoder-480ms.onnx`、
+  `joiner-480ms.onnx`、`tokens.txt`。上游未提供 SHA-256，按「同名 + 大小一致」校验。
+- 也支持手动放置 / ZIP 导入：任意 sherpa-onnx streaming Transducer 模型，把
+  `encoder*.onnx` / `decoder*.onnx` / `joiner*.onnx` / `tokens.txt` 放进
+  `voice/streaming_xasr/` 下的任意子目录即可，`VoiceModels` 会按别名扫描。
+- 设置 → 本地语音识别 → 识别引擎与模型 → 选「流式识别」；模型按「模型下载与管理」安装。
+- 流式模型与离线模型**不通用**，切换引擎后需各自安装一次；`voice/` 仍不参与资料夹同步。
+
+已知限制：X-ASR 480ms 包的 encoder 是 fp32，首次加载与内存占用明显高于 SenseVoice int8；
+低端机上建议保留 SenseVoice 作默认引擎，仅在需要「边说边出字」时切到流式。
+按住说话模式下不使用自动端点检测断句，松手始终是本次会话的结束点。

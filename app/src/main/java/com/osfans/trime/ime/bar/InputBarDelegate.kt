@@ -308,6 +308,11 @@ class InputBarDelegate(override val di: DI) :
         if (voiceRecording) voiceUi.updateLevel(level)
     }
 
+    /** 流式识别的中间结果：在语音标注里边说边显示，松手后由 setActive(false) 收起。 */
+    fun setVoicePartial(text: String) {
+        if (voiceRecording) voiceUi.updatePartial(text)
+    }
+
     /** Restyles the bar after a scheme switch without rebuilding its views. */
     fun refreshColors() {
         view.background =

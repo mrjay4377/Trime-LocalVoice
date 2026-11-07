@@ -12,10 +12,12 @@ import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.TextView
 import com.osfans.trime.R
 import com.osfans.trime.data.theme.ThemeScope
 import splitties.views.dsl.core.Ui
@@ -139,6 +141,16 @@ class VoiceIndicatorUi(
         scaleType = ImageView.ScaleType.CENTER_INSIDE
     }
 
+    /** 流式引擎的中间识别结果；整段解码的引擎不会给它内容，保持隐藏不影响原有样式。 */
+    private val partialText = TextView(ctx).apply {
+        gravity = Gravity.CENTER
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.START
+        textSize = 13f
+        setPadding(dp(16), 0, dp(16), 0)
+        visibility = View.GONE
+    }
+
     private val leftLine = VoiceWaveLine(ctx, nearMicAtEnd = true)
     private val rightLine = VoiceWaveLine(ctx, nearMicAtEnd = false)
     private val bottomDivider = View(ctx)
@@ -168,6 +180,10 @@ class VoiceIndicatorUi(
             )
             addView(rightLine, lineParams())
         }
+        addView(
+            partialText,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(22)),
+        )
         addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         addView(
             bottomDivider,
@@ -187,6 +203,7 @@ class VoiceIndicatorUi(
             rightLine.setColor(fg)
             bottomDivider.setBackgroundColor(divider)
             mic.imageTintList = ColorStateList.valueOf(fg)
+            partialText.setTextColor(fg)
         }.onFailure { Timber.w(it, "VoiceIndicatorUi: cannot resolve candidate text color") }
     }
 
@@ -196,6 +213,13 @@ class VoiceIndicatorUi(
         rightLine.setLevel(level * 0.94f)
     }
 
+    /** 流式引擎的中间识别结果；空串收起文字行，恢复原来「两条细线夹麦克风」的样式。 */
+    fun updatePartial(text: String) {
+        val value = text.trim()
+        partialText.text = value
+        partialText.visibility = if (value.isEmpty()) View.GONE else View.VISIBLE
+    }
+
     fun setActive(active: Boolean) {
         if (active) {
             if (!breathing.isStarted) breathing.start()
@@ -203,6 +227,7 @@ class VoiceIndicatorUi(
             breathing.cancel()
             mic.alpha = 1f
             updateLevel(0f)
+            updatePartial("")
         }
         leftLine.setActive(active)
         rightLine.setActive(active)

@@ -30,12 +30,18 @@ object VoiceLifecycle {
         preloadJob?.cancel()
         val manager = SherpaOfflineManager.getInstance()
         manager.cancelScheduledUnload()
+        SherpaOnlineManager.cancelScheduledUnload()
         preloadJob = scope.launch {
             runCatching {
                 val family = LocalVoiceSettings.vendor(ctx)
                 val model = VoiceModels.status(ctx, family).resolved ?: return@launch
-                val (config, key) = OfflineSherpaEngine.buildConfig(ctx, family, model)
-                manager.preload(config, key)
+                if (VoiceModels.isStreaming(family)) {
+                    val (config, key) = StreamingSherpaEngine.buildConfig(ctx, model)
+                    SherpaOnlineManager.preload(config, key)
+                } else {
+                    val (config, key) = OfflineSherpaEngine.buildConfig(ctx, family, model)
+                    manager.preload(config, key)
+                }
             }.onFailure { Timber.w(it, "voice model preload failed") }
         }
     }
@@ -48,6 +54,7 @@ object VoiceLifecycle {
         preloadJob = null
         val delayMs = LocalVoiceSettings.unloadDelayMinutes(ctx).toLong() * 60_000L
         SherpaOfflineManager.getInstance().scheduleUnload(delayMs)
+        SherpaOnlineManager.scheduleUnload(delayMs)
     }
 
     /** 输入法服务销毁：立即释放 ASR 与翻译模型，不留常驻内存。 */
@@ -55,6 +62,7 @@ object VoiceLifecycle {
         preloadJob?.cancel()
         preloadJob = null
         SherpaOfflineManager.getInstance().unload()
+        SherpaOnlineManager.unload()
         scope.launch { OfflineTranslator.shutdown() }
     }
 }

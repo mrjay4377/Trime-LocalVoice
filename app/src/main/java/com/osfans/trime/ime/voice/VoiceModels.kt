@@ -38,6 +38,11 @@ data class VoiceModelStatus(
 object VoiceModels {
     const val DIR_NAME = "voice"
 
+    /** 原生流式家族：使用 sherpa-onnx OnlineRecognizer，按住期间边录边出字。 */
+    const val STREAMING_FAMILY = "streaming_xasr"
+
+    fun isStreaming(familyId: String): Boolean = familyId == STREAMING_FAMILY
+
     val FAMILIES: List<VoiceFamily> = listOf(
         VoiceFamily(
             id = "sensevoice",
@@ -101,6 +106,19 @@ object VoiceModels {
             ),
             packageName = "sherpa-onnx-telespeech-ctc-int8-zh-2024-06-04",
         ),
+        // 原生流式：Transducer 三件套（encoder / decoder / joiner）+ tokens。
+        // 官方包名带 -480ms 后缀，这里把两种命名都列为别名，手动放置与 ZIP 导入都能识别。
+        VoiceFamily(
+            id = STREAMING_FAMILY,
+            label = "流式识别（中英，边说边出字，约 590MB）",
+            groups = listOf(
+                listOf("tokens.txt"),
+                listOf("encoder.onnx", "encoder-480ms.onnx", "encoder.int8.onnx"),
+                listOf("decoder.onnx", "decoder-480ms.onnx", "decoder.int8.onnx"),
+                listOf("joiner.onnx", "joiner-480ms.onnx", "joiner.int8.onnx"),
+            ),
+            packageName = "sherpa-onnx-streaming-x-asr-480ms-zh-en",
+        ),
     )
 
     fun family(id: String): VoiceFamily? = FAMILIES.firstOrNull { it.id == id }
@@ -150,6 +168,11 @@ object VoiceModels {
             appendLine("  官方包名：${f.packageName}")
             appendLine("  必需文件：${f.groups.joinToString("、") { it.first() }}")
         }
+        appendLine()
+        appendLine("[流式识别] 是唯一真正「边说边出字」的引擎：按住语音键时逐块解码并把中间结果显示在")
+        appendLine("候选栏语音栏，松手立即上屏；其余引擎都是松手后对整段录音推理一次。")
+        appendLine("任何 sherpa-onnx streaming Transducer 模型（含 encoder/decoder/joiner/tokens）")
+        appendLine("都可放到 voice/streaming_xasr/ 下的任意子目录使用。")
         appendLine()
         appendLine("注意：本 voice 目录固定在应用私有目录，不随「使用者资料夹 / 数据位置」改变，")
         appendLine("也不参与资料夹同步（模型体积大，避免部署时被反复哈希、复制或误删）。")

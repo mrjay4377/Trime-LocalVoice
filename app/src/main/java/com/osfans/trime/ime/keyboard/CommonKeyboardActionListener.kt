@@ -70,6 +70,7 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
         LocalVoiceController(service).apply {
             onRecordingChanged = { active -> inputBarDelegate.setVoiceRecording(active) }
             onLevelChanged = { level -> inputBarDelegate.setVoiceLevel(level) }
+            onPartialText = { text -> inputBarDelegate.setVoicePartial(text) }
         }
     }
 

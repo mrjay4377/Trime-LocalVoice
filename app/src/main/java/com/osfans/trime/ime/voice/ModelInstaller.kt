@@ -65,6 +65,7 @@ object ModelInstaller {
         val result = runCatching { !dir.exists() || dir.deleteRecursively() }.getOrDefault(false)
         // 模型可能正被常驻识别器占用，删除后立即卸载缓存，避免继续持有旧文件句柄。
         runCatching { SherpaOfflineManager.getInstance().unload() }
+        runCatching { SherpaOnlineManager.unload() }
         writeInstalledIndex(context)
         return result
     }
@@ -137,6 +138,7 @@ object ModelInstaller {
             }
         }
         runCatching { SherpaOfflineManager.getInstance().unload() }
+        runCatching { SherpaOnlineManager.unload() }
         writeInstalledIndex(app)
         return freed
     }

@@ -73,6 +73,7 @@ object LocalVoiceSettings {
     /** 配置变更后卸载已缓存的识别器，让新模型 / 线程数 / ITN 立即生效。 */
     private fun notifyConfigChanged() {
         runCatching { SherpaOfflineManager.getInstance().unload() }
+        runCatching { SherpaOnlineManager.unload() }
     }
 
     /**
@@ -86,6 +87,7 @@ object LocalVoiceSettings {
         prefs(context).edit().putInt("loc.$family.keep_alive", value).apply()
         // 切换后立即释放已常驻的模型；unload() 会等正在进行的识别结束，不会打断本次会话。
         runCatching { SherpaOfflineManager.getInstance().unload() }
+        runCatching { SherpaOnlineManager.unload() }
     }
 
     /** 把最近一次录音以 wav 保存到 voice 目录（可选，便于查看语音文件）。 */
