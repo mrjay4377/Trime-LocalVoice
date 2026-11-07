@@ -42,11 +42,13 @@ import androidx.preference.SwitchPreferenceCompat
 import com.osfans.trime.R
 import com.osfans.trime.ime.voice.AudioRecorder
 import com.osfans.trime.ime.voice.InstalledModel
+import com.osfans.trime.ime.voice.LocalVoicePackage
 import com.osfans.trime.ime.voice.LocalVoiceSettings
 import com.osfans.trime.ime.voice.ModelCatalog
 import com.osfans.trime.ime.voice.ModelInstaller
 import com.osfans.trime.ime.voice.ModelVariant
 import com.osfans.trime.ime.voice.OfflineTranslator
+import com.osfans.trime.ime.voice.VoiceLifecycle
 import com.osfans.trime.ime.voice.VoiceModels
 import com.osfans.trime.ui.common.PaddingPreferenceFragment
 import io.github.yinvoker.foxlet.LanguagePair
@@ -74,6 +76,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     private var threadsPreference: ListPreference? = null
     private var languagePreference: ListPreference? = null
     private var keepAlivePreference: ListPreference? = null
+    private var powerSavePreference: SwitchPreferenceCompat? = null
     private var sourcePreference: Preference? = null
     private var itnPreference: SwitchPreferenceCompat? = null
     private var conversionPreference: ListPreference? = null
@@ -186,16 +189,9 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     isIconSpaceReserved = false
                     modelsPreference = this
                     setOnPreferenceClickListener {
-                        // 咩版的「下载并自动安装模型」主按钮：没装任何模型时本项就是它。
-                        // 手动放置 / ZIP 导入的模型也算「已安装」，否则用户会找不到自己的模型。
-                        val hasAny = ModelInstaller.installedModels(ctx).isNotEmpty() ||
-                            ModelCatalog.VARIANTS.any { ModelInstaller.isInstalled(ctx, it) }
-                        if (!hasAny) {
-                            ModelCatalog.VARIANTS.minByOrNull { it.downloadMiB }
-                                ?.let { confirmDownload(ctx, it) { refresh(ctx) } }
-                        } else {
-                            showModelList(ctx)
-                        }
+                        // 无论装没装模型都先给「本地语音包 + 可下载模型」选择列表，
+                        // 不再在空目录时直接替用户下载某一个规格。
+                        showModelManager(ctx)
                         true
                     }
                 },
@@ -356,6 +352,22 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     translatePacksPreference = this
                     setOnPreferenceClickListener {
                         showTranslationPacks(ctx)
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                SwitchPreferenceCompat(ctx).apply {
+                    key = KEY_POWER_SAVE
+                    title = "省电模式"
+                    summary = "流式单核推理 · 静音 10 秒自动结束录音 · 不缓存整段 PCM"
+                    isIconSpaceReserved = false
+                    isChecked = LocalVoiceSettings.isPowerSave(ctx)
+                    powerSavePreference = this
+                    setOnPreferenceChangeListener { _, newValue ->
+                        LocalVoiceSettings.setPowerSave(ctx, newValue as Boolean)
+                        refresh(ctx)
                         true
                     }
                 },
@@ -542,14 +554,38 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         isIconSpaceReserved = false
     }
 
+    /** voice 目录里真实存在的模型（下载安装 / ZIP 导入 / 手动放置）。 */
+    private fun localPackages(ctx: Context): List<LocalVoicePackage> =
+        runCatching { ModelInstaller.localPackages(ctx) }.getOrDefault(emptyList())
+
+    private fun localValue(pkg: LocalVoicePackage): String =
+        "local|${pkg.familyId}|${pkg.key}"
+
+    /** 只把「非规格目录」的本地包单列，避免与下面「已安装」的规格模型重复。 */
+    private fun manualPackages(ctx: Context): List<LocalVoicePackage> {
+        val catalogIds = ModelCatalog.VARIANTS.map { it.id }.toHashSet()
+        return localPackages(ctx).filterNot { "${it.familyId}/${it.key}" in catalogIds }
+    }
+
     /**
-     * 「识别引擎与模型」弹窗的分组数据：已安装置顶，其后按引擎家族分组，
-     * 组内按体积升序；每个选项只显示短标题 + 一行大小/状态，不再让长文字互串。
+     * 「识别引擎与模型」弹窗的分组数据：本地语音包置顶，其后是已下载规格，
+     * 再按引擎家族分组列出可下载模型；每项只显示短标题 + 一行大小/状态。
      */
     private fun engineRows(ctx: Context): List<EngineRow> {
         val installed = getString(R.string.local_asr_model_installed)
         val notInstalled = getString(R.string.local_asr_model_not_installed)
         val rows = mutableListOf<EngineRow>()
+        val manual = manualPackages(ctx)
+        if (manual.isNotEmpty()) {
+            rows += EngineRow.Header("本地语音包（手动放置 / ZIP 导入）· 点击设为当前")
+            manual.forEach { pkg ->
+                rows += EngineRow.Option(
+                    localValue(pkg),
+                    pkg.label,
+                    "${formatMiB(pkg.sizeBytes)} · ${displayPath(ctx, pkg.dir.absolutePath)}",
+                )
+            }
+        }
         val ready = ModelCatalog.VARIANTS
             .filter { ModelInstaller.isInstalled(ctx, it) }
             .sortedWith(compareBy({ it.familyLabel }, { it.downloadMiB }))
@@ -580,8 +616,19 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         return rows
     }
 
-    /** 自动项切换引擎；具体模型项要么设为当前，要么触发下载。 */
+    /** 自动项切换引擎；具体模型项要么设为当前，要么触发下载；local| 指向手动放置的目录。 */
     private fun onEngineSelected(ctx: Context, value: String) {
+        if (value.startsWith("local|")) {
+            val parts = value.split('|', limit = 3)
+            val familyId = parts.getOrElse(1) { "" }
+            val key = parts.getOrElse(2) { "" }
+            if (familyId.isNotBlank()) {
+                LocalVoiceSettings.setVendor(ctx, familyId)
+                LocalVoiceSettings.setSelectedVariant(ctx, familyId, key)
+            }
+            refresh(ctx)
+            return
+        }
         val familyId = value.substringBefore('|')
         val variantKey = value.substringAfter('|')
         if (variantKey.isEmpty()) {
@@ -608,7 +655,12 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     private fun showEnginePicker(ctx: Context) {
         val rows = engineRows(ctx)
         val family = LocalVoiceSettings.vendor(ctx)
-        val current = "$family|${LocalVoiceSettings.selectedVariant(ctx, family)}"
+        val key = LocalVoiceSettings.selectedVariant(ctx, family)
+        val current = when {
+            key.isEmpty() && localPackages(ctx).any { it.key.isEmpty() } -> "local|$family|"
+            key.isNotEmpty() && ModelCatalog.byId("$family/$key") == null -> "local|$family|$key"
+            else -> "$family|$key"
+        }
         AlertDialog.Builder(ctx)
             .setTitle(getString(R.string.local_asr_vendor))
             .setAdapter(engineAdapter(ctx, rows, current, showRadio = true)) { dialog, which ->
@@ -618,6 +670,100 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             }
             .setNeutralButton("删除模型") { _, _ -> showDeleteModels(ctx) }
             .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * 「模型下载与管理」：始终给完整选择列表，先列本地语音包再列可下载规格。
+     * 空目录时也列出全部规格，不再默默替用户下载体积最小的那一个。
+     */
+    private fun showModelManager(ctx: Context) {
+        val packages = localPackages(ctx)
+        val variants = ModelCatalog.VARIANTS.sortedWith(
+            compareByDescending<ModelVariant> { ModelInstaller.isInstalled(ctx, it) }
+                .thenBy { it.familyLabel }
+                .thenBy { it.downloadMiB },
+        )
+        val rows = mutableListOf<EngineRow>()
+        if (packages.isNotEmpty()) {
+            rows += EngineRow.Header("本地语音包（已安装 ${packages.size} 套）· 点击管理")
+            packages.forEach { pkg ->
+                rows += EngineRow.Option(
+                    localValue(pkg),
+                    pkg.label,
+                    "${formatMiB(pkg.sizeBytes)} · ${displayPath(ctx, pkg.dir.absolutePath)}",
+                )
+            }
+        }
+        rows += EngineRow.Header("可下载模型（${variants.size} 种）· 点击下载")
+        var lastFamily = ""
+        variants.forEach { v ->
+            if (v.familyLabel != lastFamily) {
+                rows += EngineRow.Header(v.familyLabel)
+                lastFamily = v.familyLabel
+            }
+            val state = if (ModelInstaller.isInstalled(ctx, v)) {
+                "已安装 · 点击设为当前"
+            } else {
+                "${v.downloadMiB} MiB · 点击下载"
+            }
+            rows += EngineRow.Option("catalog|${v.id}", v.label, state)
+        }
+        AlertDialog.Builder(ctx)
+            .setTitle("模型下载与管理")
+            .setAdapter(engineAdapter(ctx, rows, current = "", showRadio = false)) { dialog, which ->
+                val row = rows.getOrNull(which) as? EngineRow.Option ?: return@setAdapter
+                dialog.dismiss()
+                when {
+                    row.value.startsWith("local|") -> {
+                        val pkg = packages.firstOrNull { localValue(it) == row.value }
+                        if (pkg != null) showLocalPackageActions(ctx, pkg)
+                    }
+                    row.value.startsWith("catalog|") -> {
+                        val variant = ModelCatalog.byId(row.value.removePrefix("catalog|"))
+                        if (variant != null) {
+                            if (ModelInstaller.isInstalled(ctx, variant)) {
+                                LocalVoiceSettings.setVendor(ctx, variant.familyId)
+                                LocalVoiceSettings.setSelectedVariant(ctx, variant.familyId, variant.key)
+                                refresh(ctx)
+                            } else {
+                                confirmDownload(ctx, variant) { refresh(ctx) }
+                            }
+                        }
+                    }
+                }
+            }
+            .setPositiveButton(android.R.string.ok, null)
+            .setNeutralButton("从本地导入 ZIP") { _, _ -> openZipLauncher.launch(arrayOf("*/*")) }
+            .setNegativeButton("删除管理") { _, _ -> showDeleteModels(ctx) }
+            .show()
+    }
+
+    /** 本地语音包的操作：设为当前 / 复制路径 / 删除。 */
+    private fun showLocalPackageActions(ctx: Context, pkg: LocalVoicePackage) {
+        val actions = arrayOf("设为当前引擎", "复制目录路径", "删除此模型")
+        AlertDialog.Builder(ctx)
+            .setTitle(pkg.label)
+            .setMessage(
+                "目录：${displayPath(ctx, pkg.dir.absolutePath)}\n" +
+                    "占用：${formatMiB(pkg.sizeBytes)}",
+            ).setItems(actions) { _, which ->
+                when (which) {
+                    0 -> onEngineSelected(ctx, localValue(pkg))
+                    1 -> copyPath(ctx, pkg.dir.absolutePath)
+                    else -> confirmDelete(
+                        ctx,
+                        listOf(
+                            InstalledModel(
+                                dir = pkg.dir,
+                                label = pkg.label,
+                                sizeBytes = pkg.sizeBytes,
+                                flatRoot = pkg.flatRoot,
+                            ),
+                        ),
+                    )
+                }
+            }.setNegativeButton(android.R.string.cancel, null)
             .show()
     }
 
@@ -775,12 +921,11 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     "目录：${displayPath(ctx, ModelInstaller.installedDir(ctx, variant).absolutePath)}\n" +
                     "删除后需重新下载才能使用，此操作不可恢复。",
             ).setPositiveButton("删除") { _, _ ->
-                val ok = ModelInstaller.uninstall(ctx, variant)
-                toast(
-                    ctx,
-                    if (ok) getString(R.string.local_asr_model_deleted) else "删除失败，请检查 voice 目录权限",
-                )
-                refresh(ctx)
+                // uninstall 会等待 native 识别器释放并递归删除几百 MB 文件，
+                // 绝不能放在主线程，否则 ANR / native 崩溃直接把 APP 关掉。
+                runDeletion(ctx, "已删除 ${variant.displayName}") {
+                    ModelInstaller.uninstall(ctx.applicationContext, variant)
+                }
             }.setNegativeButton(android.R.string.cancel, null)
             .show()
     }
@@ -810,9 +955,11 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 }
             }
             .setNeutralButton("清理缓存（${formatMiB(cacheBytes)}）") { _, _ ->
-                val freed = ModelInstaller.clearDownloadCache(ctx)
-                toast(ctx, if (freed > 0L) "已清理下载缓存 ${formatMiB(freed)}" else "下载缓存为空")
-                refresh(ctx)
+                val app = ctx.applicationContext
+                runDeletion(
+                    ctx,
+                    if (cacheBytes > 0L) "已清理下载缓存 ${formatMiB(cacheBytes)}" else "下载缓存为空",
+                ) { ModelInstaller.clearDownloadCache(app) }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -836,10 +983,38 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
 
     private fun performDelete(ctx: Context, models: List<InstalledModel>) {
         val app = ctx.applicationContext
+        runDeletion(ctx, "已删除 ${models.size} 套模型，释放 ${formatMiB(models.sumOf { it.sizeBytes })}") {
+            ModelInstaller.deleteModels(app, models)
+        }
+    }
+
+    /**
+     * 所有删除 / 清理统一走这里：进度对话框 + IO 线程 + 捕获全部异常。
+     * 之前删除动作直接在主线程 free native 识别器并递归删几百 MB，异常或 ANR
+     * 都会让进程直接退出；现在即使失败也只给一条中文提示。
+     */
+    private fun runDeletion(
+        ctx: Context,
+        successMessage: String,
+        block: suspend () -> Unit,
+    ) {
+        val dialog = AlertDialog.Builder(ctx)
+            .setTitle("正在删除模型")
+            .setMessage("正在释放识别器并删除模型文件，请稍候…")
+            .setCancelable(false)
+            .show()
         viewLifecycleOwner.lifecycleScope.launch {
-            val freed = withContext(Dispatchers.IO) { ModelInstaller.deleteModels(app, models) }
-            toast(ctx, "已删除 ${models.size} 套模型，释放 ${formatMiB(freed)}")
-            context?.let(::refresh)
+            try {
+                withContext(Dispatchers.IO) { block() }
+                toast(ctx, successMessage)
+            } catch (t: CancellationException) {
+                throw t
+            } catch (t: Throwable) {
+                toast(ctx, "删除失败：${t.message ?: t.javaClass.simpleName}")
+            } finally {
+                runCatching { dialog.dismiss() }
+                if (isAdded) context?.let(::refresh)
+            }
         }
     }
 
@@ -1133,6 +1308,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     "当前方向需要 $n 套语言包 · 点击下载 / 删除 / 查看状态"
                 }
         }
+        powerSavePreference?.isChecked = LocalVoiceSettings.isPowerSave(ctx)
         val keepAlive = LocalVoiceSettings.keepAliveMinutes(ctx, family).toString()
         keepAlivePreference?.apply {
             val v = if (keepAlive in KEEP_ALIVE_VALUES) keepAlive else "-1"
@@ -1149,16 +1325,14 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         val source = LocalVoiceSettings.downloadSource(ctx)
         sourcePreference?.summary = "当前：${ModelCatalog.SOURCES[source]}\n点击切换下载源或复制模型地址"
 
-        // 没有模型时，这一项变成咩版那种显眼的「下载并自动安装」主操作。
         val present = ModelInstaller.installedModels(ctx)
         modelsPreference?.apply {
-            if (present.isEmpty()) {
-                val rec = ModelCatalog.VARIANTS.minByOrNull { it.downloadMiB }
-                title = "下载并安装模型"
-                summary = "推荐 ${rec?.displayName ?: "最小模型"} · 约 ${rec?.downloadMiB ?: 0} MiB · 点击一键安装"
+            title = "下载并安装模型 / 本地语音包"
+            summary = if (present.isEmpty()) {
+                "本地暂无语音包 · 可下载 ${ModelCatalog.VARIANTS.size} 种 · 点击打开选择列表"
             } else {
-                title = getString(R.string.local_asr_models)
-                summary = "已安装 ${present.size} 套 · 可下载 ${ModelCatalog.VARIANTS.size} 种 · 点击查看 / 下载 / 切换"
+                "本地语音包 ${present.size} 套（占用 ${formatMiB(present.sumOf { it.sizeBytes })}）· " +
+                    "可下载 ${ModelCatalog.VARIANTS.size} 种 · 点击查看 / 下载 / 切换"
             }
         }
         deletePreference?.summary = if (present.isEmpty()) {
@@ -1166,6 +1340,9 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         } else {
             "已安装 ${present.size} 套 · 占用 ${formatMiB(present.sumOf { it.sizeBytes })} · 点击选择并删除"
         }
+        // 切换引擎 / 线程数 / 删除模型都会卸载识别器；从设置页返回时键盘常常已经弹着，
+        // 不会再触发 onStartInputView，这里主动补一次后台预热，避免首次按语音键冷加载。
+        VoiceLifecycle.warmUp(ctx.applicationContext)
     }
 
     /** 设置项摘要直接显示当前引擎与模型，避免列表弹窗关闭后看不出选了什么。 */
@@ -1173,11 +1350,11 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         val familyLabel = VoiceModels.family(family)?.label?.substringBefore("（") ?: family
         val key = LocalVoiceSettings.selectedVariant(ctx, family)
         val variant = ModelCatalog.VARIANTS.firstOrNull { it.familyId == family && it.key == key }
-        val current = if (variant == null) {
-            "$familyLabel · 自动选择"
-        } else {
-            "$familyLabel · ${variant.label}" +
+        val current = when {
+            variant != null -> "$familyLabel · ${variant.label}" +
                 if (ModelInstaller.isInstalled(ctx, variant)) "（已安装）" else "（未安装）"
+            key.isNotBlank() -> "$familyLabel · 本地语音包 $key"
+            else -> "$familyLabel · 自动选择"
         }
         return "当前：$current\n点击选择引擎 / 具体模型"
     }
@@ -1248,6 +1425,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         const val KEY_ITN = "lv_itn"
         const val KEY_OUTPUT_CONVERSION = "lv_output_conversion"
         const val KEY_KEEP_ALIVE = "lv_keep_alive"
+        const val KEY_POWER_SAVE = "lv_power_save"
         const val KEY_UNLOAD_DELAY = "lv_unload_delay"
         const val KEY_TRANSLATE = "lv_translate"
         const val KEY_TRANSLATE_DIRECTION = "lv_translate_direction"

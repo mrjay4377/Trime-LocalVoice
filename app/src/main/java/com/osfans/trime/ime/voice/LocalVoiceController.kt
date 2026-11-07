@@ -27,8 +27,10 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private class Session(val familyId: String) {
+    private class Session(val familyId: String, val keepAudio: Boolean) {
+        /** 只有在开启「保存录音」时才真正缓存整段 PCM；流式识别本身只需计数。 */
         val pcm = ByteArrayOutputStream()
+        var pcmBytes = 0
         var engine: AsrEngine? = null
         var recorder: AudioRecorder? = null
         var watchdog: Job? = null
@@ -37,6 +39,10 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
         var finished = false
         var seconds = 0f
         var peakLevel = 0f
+        var silentMs = 0
+        var heardSpeech = false
+        /** 引擎加载期间显示在语音栏的状态文字；首个真实中间结果出现时清空。 */
+        var statusText = ""
     }
 
     @Volatile
@@ -59,11 +65,20 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
     private fun publishRecording(active: Boolean) {
         if (recording == active) return
         recording = active
-        if (!active) main.post {
-            onLevelChanged?.invoke(0f)
-            onPartialText?.invoke("")
+        if (!active) {
+            current?.statusText = ""
+            main.post {
+                onLevelChanged?.invoke(0f)
+                onPartialText?.invoke("")
+            }
         }
         main.post { onRecordingChanged?.invoke(active) }
+        // 模型加载可能比「按住」更早开始：语音栏出现时把已排队的状态文字补上，
+        // 否则用户只看到波形却不知道正在加载，误以为「已经在说话却没出字」。
+        if (active) {
+            val status = current?.statusText.orEmpty()
+            if (status.isNotEmpty()) main.post { onPartialText?.invoke(status) }
+        }
     }
 
     /** 只保留一个 Toast：多条提示会排队显示，导致上屏文字后仍弹出旧的「正在录音」。 */
@@ -114,7 +129,8 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
             return false
         }
 
-        val session = Session(familyId)
+        val powerSave = LocalVoiceSettings.isPowerSave(service)
+        val session = Session(familyId, keepAudio = LocalVoiceSettings.isSaveRecording(service))
         current = session
         val listener = object : AsrListener {
             override fun onFinal(text: String) {
@@ -177,7 +193,17 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
             override fun onPartial(text: String) {
                 main.post {
                     if (current !== session || session.finished || !recording) return@post
+                    if (session.statusText.isNotEmpty()) session.statusText = ""
                     onPartialText?.invoke(text)
+                }
+            }
+
+            /** 模型加载中等阶段性提示，与中间结果共用语音栏但不互相覆盖。 */
+            override fun onStatus(text: String) {
+                main.post {
+                    if (current !== session || session.finished) return@post
+                    session.statusText = text
+                    if (recording) onPartialText?.invoke(text)
                 }
             }
 
@@ -198,7 +224,10 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
                 scope = scope,
                 listener = listener,
                 model = model,
-                onLoadStart = { notice("正在加载流式模型，首次加载可能较慢…") },
+                onLoadStart = {
+                    notice("正在加载流式模型，语音会先缓冲，不会丢字…")
+                    listener.onStatus("正在加载流式模型，语音已缓冲…")
+                },
             )
         } else {
             OfflineSherpaEngine(
@@ -224,12 +253,33 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
             onChunk = { chunk ->
                 // 关键：PCM 必须同时喂给识别引擎。只存 session.pcm 会让引擎拿到空 buffer，
                 // stop() 直接返回空文本，表现为「按住有语音栏、松手却没有文字」。
-                session.pcm.write(chunk)
+                // 流式引擎自己持有队列，这里不必再缓存整段录音（省内存 / 少 GC / 更省电）。
+                session.pcmBytes += chunk.size
+                if (session.keepAudio) session.pcm.write(chunk)
                 session.engine?.feed(chunk)
                 val level = AudioRecorder.pcmLevel(chunk)
                 if (level > session.peakLevel) session.peakLevel = level
                 main.post {
                     if (recording && current === session) onLevelChanged?.invoke(level)
+                }
+                // 省电：说完话后还一直按着键时，麦克风与解码器会持续满负荷跑。
+                // 检测到一段静音就自动结束识别；完全没说话时也提前收工，不再空转到 2 分钟。
+                if (powerSave && !session.finishing && !session.finished) {
+                    if (level > 0.02f) {
+                        session.heardSpeech = true
+                        session.silentMs = 0
+                    } else {
+                        session.silentMs += AudioRecorder.CHUNK_MILLIS
+                        val limit = if (session.heardSpeech) 10_000 else 20_000
+                        if (session.silentMs >= limit) {
+                            main.post {
+                                if (current === session && !session.finishing && !session.finished) {
+                                    notice(if (session.heardSpeech) "检测到静音，自动结束录音" else "未检测到语音，自动结束录音")
+                                    finish()
+                                }
+                            }
+                        }
+                    }
                 }
             },
         )
@@ -261,13 +311,12 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
         session.watchdog?.cancel()
         scope.launch {
             session.recorder?.stopAndJoin()
-            val pcm = session.pcm.toByteArray()
-            session.seconds = pcm.size / (AudioRecorder.SAMPLE_RATE * 2f)
-            if (LocalVoiceSettings.isSaveRecording(service)) saveRecording(pcm)
+            session.seconds = session.pcmBytes / (AudioRecorder.SAMPLE_RATE * 2f)
+            if (session.keepAudio) saveRecording(session.pcm.toByteArray())
             Timber.i(
                 "LocalVoice captured %.1fs (%d bytes), peak level %.2f",
                 session.seconds,
-                pcm.size,
+                session.pcmBytes,
                 session.peakLevel,
             )
             if (current === session && !session.finished) {

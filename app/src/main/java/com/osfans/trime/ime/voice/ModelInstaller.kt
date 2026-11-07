@@ -35,7 +35,32 @@ data class InstalledModel(
     val flatRoot: Boolean,
 )
 
+/**
+ * 本地语音包：包括一键下载安装的规格模型、ZIP 导入的 import_* 目录、
+ * 以及用户手动放到 voice 里的目录。设置页据此列出「可直接选用的本地包」。
+ */
+data class LocalVoicePackage(
+    val familyId: String,
+    /** 目录名；空串表示平铺在 voice 根目录，用自动扫描。 */
+    val key: String,
+    val label: String,
+    val sizeBytes: Long,
+    val dir: File,
+    /** 平铺在 voice 根目录时删除只能删模型文件，不能递归删掉整个 voice。 */
+    val flatRoot: Boolean,
+)
+
 object ModelInstaller {
+    /**
+     * 删除 / 替换模型文件前，必须先让 native 识别器真正释放：
+     * 旧实现是 fire-and-forget 的 unload()，文件可能正在被 ONNX 会话占用，
+     * 释放与删除并发时会触发 native 崩溃，表现为「删除模型后 APP 直接退出」。
+     */
+    suspend fun releaseEngines() {
+        SherpaOnlineManager.unloadNow()
+        SherpaOfflineManager.getInstance().unloadNow()
+    }
+
     const val PHASE_DOWNLOAD = "下载模型"
     const val PHASE_EXTRACT = "解压模型"
     const val PHASE_VERIFY = "校验文件"
@@ -57,15 +82,13 @@ object ModelInstaller {
     fun installedKeys(context: Context, familyId: String): Set<String> =
         ModelCatalog.variantsOf(familyId).filter { isInstalled(context, it) }.map { it.key }.toSet()
 
-    fun uninstall(context: Context, variant: ModelVariant): Boolean {
+    suspend fun uninstall(context: Context, variant: ModelVariant): Boolean {
+        releaseEngines()
         val dir = installedDir(context, variant)
         if (LocalVoiceSettings.selectedVariant(context, variant.familyId) == variant.key) {
             LocalVoiceSettings.setSelectedVariant(context, variant.familyId, "")
         }
         val result = runCatching { !dir.exists() || dir.deleteRecursively() }.getOrDefault(false)
-        // 模型可能正被常驻识别器占用，删除后立即卸载缓存，避免继续持有旧文件句柄。
-        runCatching { SherpaOfflineManager.getInstance().unload() }
-        runCatching { SherpaOnlineManager.unload() }
         writeInstalledIndex(context)
         return result
     }
@@ -113,7 +136,8 @@ object ModelInstaller {
     }
 
     /** 删除选中的模型目录，返回实际释放的字节数；同时重置选中项并卸载识别器缓存。 */
-    fun deleteModels(context: Context, models: List<InstalledModel>): Long {
+    suspend fun deleteModels(context: Context, models: List<InstalledModel>): Long {
+        releaseEngines()
         val app = context.applicationContext
         var freed = 0L
         models.forEach { model ->
@@ -137,10 +161,48 @@ object ModelInstaller {
                 LocalVoiceSettings.setSelectedVariant(app, family.id, "")
             }
         }
-        runCatching { SherpaOfflineManager.getInstance().unload() }
-        runCatching { SherpaOnlineManager.unload() }
         writeInstalledIndex(app)
         return freed
+    }
+
+    /**
+     * 列出 voice 目录里所有可直接选用的本地语音包，并推断所属引擎家族。
+     * 下载安装的规格目录用父目录名；手动放置的目录按「必需文件是否齐全」回推家族。
+     */
+    fun localPackages(context: Context): List<LocalVoicePackage> {
+        val fallbackFamily = LocalVoiceSettings.vendor(context)
+        return installedModels(context).mapNotNull { model ->
+            if (model.flatRoot) {
+                return@mapNotNull LocalVoicePackage(
+                    familyId = fallbackFamily,
+                    key = "",
+                    label = "voice 根目录（手动平铺）",
+                    sizeBytes = model.sizeBytes,
+                    dir = model.dir,
+                    flatRoot = true,
+                )
+            }
+            val parent = model.dir.parentFile?.name
+            val byParent = parent?.let { VoiceModels.family(it)?.id }
+            val names = model.dir.listFiles()
+                ?.filter { it.isFile }
+                ?.map { it.name.lowercase(Locale.ROOT) }
+                ?.toSet()
+                .orEmpty()
+            val byFiles = VoiceModels.FAMILIES.firstOrNull { family ->
+                family.groups.all { group -> group.any { it.lowercase(Locale.ROOT) in names } }
+            }?.id
+            val familyId = byParent ?: byFiles ?: fallbackFamily
+            LocalVoicePackage(
+                familyId = familyId,
+                key = model.dir.name,
+                label = VoiceModels.family(familyId)?.label?.substringBefore("（")
+                    ?.let { "$it · ${model.label}" } ?: model.label,
+                sizeBytes = model.sizeBytes,
+                dir = model.dir,
+                flatRoot = false,
+            )
+        }.sortedWith(compareBy({ it.familyId }, { it.label }))
     }
 
     /** 下载缓存（未完成的 zip、解压临时目录）占用空间，可单独清理。 */

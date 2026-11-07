@@ -31,7 +31,7 @@ class AudioRecorder(
 ) {
     companion object {
         const val SAMPLE_RATE = 16000
-        private const val CHUNK_MILLIS = 200
+        const val CHUNK_MILLIS = 200
 
         fun hasPermission(context: Context): Boolean =
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==

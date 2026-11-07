@@ -161,3 +161,34 @@ v30 新增第 7 个引擎家族 `streaming_xasr`，走同一份 AAR 里现成的
 已知限制：X-ASR 480ms 包的 encoder 是 fp32，首次加载与内存占用明显高于 SenseVoice int8；
 低端机上建议保留 SenseVoice 作默认引擎，仅在需要「边说边出字」时切到流式。
 按住说话模式下不使用自动端点检测断句，松手始终是本次会话的结束点。
+
+## v31：省电、删除稳定性、模型列表、减包与首字延迟
+
+| 问题 | 处理 |
+| --- | --- |
+| 耗电 | 新增「省电模式」（默认开）：流式推理固定 1 核、说完静音 10 秒 / 全程无语音 20 秒自动结束录音、流式会话不再缓存整段 PCM（减少内存分配与 GC） |
+| 删除模型后 APP 退出 | `SherpaOnlineManager` 加入会话计数与延迟释放，native 释放统一放 IO 线程；`releaseEngines()` 会等解码结束再删文件；设置页所有删除 / 清理改为后台进度对话框 + 全异常捕获 |
+| 下载没有选择列表 / 看不到本地包 | 「下载并安装模型 / 本地语音包」始终打开完整选择列表：先列 voice 目录里真实存在的本地语音包（含 ZIP 导入、手动放置），再按引擎分组列出全部可下载规格；「识别引擎与模型」弹窗也新增本地包分组，可直接设为当前 |
+| APK 体积 | 新增 `scripts/repack_apk.py`：以 deflate level 9 重打包（AAPT2 默认级别偏低）、zipalign 后用同一把 `~/.android/debug.keystore` 重签，签名证书不变，可直接覆盖安装。实测约省 11% |
+| 流式首次加载慢 | 预热提前到 `onStartInput`（输入框获焦即开始，比键盘弹出早），并在设置页刷新 / 安装完成 / 切换配置后主动补预热；加载期间语音栏显示「正在加载…」，PCM 在 `Channel` 中缓冲，模型就绪后回放，开头语音不丢 |
+
+### 减包脚本用法
+
+```bash
+export JAVA_HOME=<jdk17>
+export ANDROID_HOME=<android-sdk>
+APK=$(ls app/build/outputs/apk/debug/*arm64-v8a-debug.apk | head -1)
+python scripts/repack_apk.py "$APK" ../Trime-LocalVoice-v31-arm64-v8a.apk
+```
+
+脚本会打印原始 / 精简体积并自动执行 `apksigner verify`。它只改 ZIP 压缩流，不改文件内容；
+`resources.arsc` 等必须 STORED 的条目保持原样并由 zipalign 对齐。重签使用与 Gradle debug
+相同的密钥（SHA-256 `629c7023…`），所以覆盖安装不会被系统拒绝。
+
+### 仍待评估
+
+官方 k2-fsa `asr-models` release 有更小的
+`sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05.tar.bz2`
+（约 128 MiB，int8，体积和内存约为现用 fp32 包的 1/4），可进一步缩短首次加载并降低耗电。
+但官方只发 `tar.bz2`，需要让安装器支持 bzip2 + tar（引入 commons-compress）才能一键下载；
+当前可先手动解压后放进 `voice/streaming_xasr/` 使用。

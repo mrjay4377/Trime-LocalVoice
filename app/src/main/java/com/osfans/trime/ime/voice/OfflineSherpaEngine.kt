@@ -153,6 +153,8 @@ internal class SherpaOfflineManager {
     @Volatile
     private var unloadJob: Job? = null
 
+    fun isLoaded(key: String): Boolean = cachedRecognizer != null && cachedKey == key
+
     fun cancelScheduledUnload() {
         unloadJob?.cancel()
         unloadJob = null
@@ -205,6 +207,20 @@ internal class SherpaOfflineManager {
             snapshot.release()
             Timber.d("sherpa offline recognizer unloaded")
         }
+    }
+
+    /** 删除模型文件前同步释放：等正在进行的解码结束，再真正 free native 对象后返回。 */
+    suspend fun unloadNow() {
+        val snapshot = mutex.withLock {
+            unloadJob?.cancel()
+            unloadJob = null
+            val old = cachedRecognizer
+            cachedRecognizer = null
+            cachedConfig = null
+            cachedKey = null
+            old
+        }
+        snapshot?.release()
     }
 
     private fun createRecognizer(config: Any): Any {

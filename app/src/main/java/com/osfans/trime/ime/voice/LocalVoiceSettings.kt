@@ -38,6 +38,18 @@ object LocalVoiceSettings {
         notifyConfigChanged()
     }
 
+    /**
+     * 省电模式（默认开）：流式推理固定 1 线程、静音 10 秒自动结束录音、
+     * 不再为「保存录音」之外的用途缓存整段 PCM。关掉后保持原来的满速行为。
+     */
+    fun isPowerSave(context: Context): Boolean = prefs(context).getBoolean("power_save", true)
+
+    fun setPowerSave(context: Context, value: Boolean) {
+        prefs(context).edit().putBoolean("power_save", value).apply()
+        // 线程数变化会让识别器缓存指纹失效，必须重建，否则省电开关看起来没生效。
+        notifyConfigChanged()
+    }
+
     /** 模型下载源：0 = 自动（官方 → 镜像），1 = 官方，2..4 = 镜像。 */
     fun downloadSource(context: Context): Int =
         prefs(context).getInt("download_source", 0).coerceIn(0, ModelCatalog.SOURCES.lastIndex)

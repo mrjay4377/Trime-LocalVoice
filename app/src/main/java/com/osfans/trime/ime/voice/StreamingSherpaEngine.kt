@@ -20,6 +20,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import timber.log.Timber
 import java.io.File
 import java.lang.reflect.Method
@@ -50,6 +51,16 @@ internal object SherpaOnlineManager {
     @Volatile
     private var unloadJob: Job? = null
 
+    @Volatile
+    private var releaseJob: Job? = null
+
+    /** 正在使用该识别器的会话数；>0 时绝不释放 native 对象，避免 use-after-free 直接杀进程。 */
+    @Volatile
+    private var activeSessions = 0
+
+    @Volatile
+    private var pendingUnload = false
+
     fun cancelScheduledUnload() {
         unloadJob?.cancel()
         unloadJob = null
@@ -64,38 +75,96 @@ internal object SherpaOnlineManager {
         Timber.d("sherpa online unload scheduled in %d ms", delayMs)
     }
 
+    /** 当前指纹是否已常驻，供设置页显示「已就绪 / 待加载」。 */
+    fun isLoaded(key: String): Boolean = cached != null && cachedKey == key && !pendingUnload
+
     /** 键盘弹出时后台预加载，与正式会话共用同一把锁与指纹。 */
     fun preload(config: Any, key: String) {
         get(config, key, null)
     }
 
     /** 取（或创建）缓存的识别器；返回的对象由本管理器持有，调用方不要 release。 */
-    fun get(config: Any, key: String, onLoadStart: (() -> Unit)?): Any = synchronized(this) {
-        unloadJob?.cancel()
-        unloadJob = null
-        val hit = cached
-        if (hit != null && cachedKey == key) return@synchronized hit
-        onLoadStart?.invoke()
-        hit?.let { releaseRecognizer(it) }
-        Timber.i("sherpa online model loading")
-        val created = createRecognizer(config)
-        cached = created
-        cachedKey = key
-        Timber.i("sherpa online model loaded")
-        created
-    }
-
-    fun unload() {
-        val snapshot = synchronized(this) {
-            val old = cached
-            cached = null
-            cachedKey = null
+    fun get(config: Any, key: String, onLoadStart: (() -> Unit)?): Any {
+        // 等上一次 native 释放结束再建新会话，避免两个 600MB 识别器短暂共存。
+        // 必须在拿管理器锁之前等：释放任务内部也要拿同一把锁，否则互相等待形成死锁。
+        // 本方法只从 IO 线程调用，runBlocking 不会阻塞主线程。
+        releaseJob?.takeIf { it.isActive }?.let { runBlocking { it.join() } }
+        return synchronized(this) {
             unloadJob?.cancel()
             unloadJob = null
-            old
+            val hit = cached
+            // 有会话正在使用识别器时一律不换、不释放：配置变更（含 pendingUnload）
+            // 都推迟到 endSession() 之后生效，杜绝 native use-after-free。
+            if (activeSessions > 0 && hit != null) return@synchronized hit
+            if (hit != null && cachedKey == key && !pendingUnload) return@synchronized hit
+            onLoadStart?.invoke()
+            hit?.let { releaseRecognizer(it) }
+            pendingUnload = false
+            Timber.i("sherpa online model loading")
+            val created = createRecognizer(config)
+            cached = created
+            cachedKey = key
+            Timber.i("sherpa online model loaded")
+            created
+        }
+    }
+
+    fun beginSession() {
+        synchronized(this) { activeSessions++ }
+    }
+
+    fun endSession() {
+        val toRelease = synchronized(this) {
+            activeSessions = (activeSessions - 1).coerceAtLeast(0)
+            if (activeSessions == 0 && pendingUnload && cached != null) {
+                pendingUnload = false
+                val old = cached
+                cached = null
+                cachedKey = null
+                old
+            } else {
+                null
+            }
         } ?: return
-        releaseRecognizer(snapshot)
-        Timber.d("sherpa online recognizer unloaded")
+        releaseJob = scope.launch { releaseRecognizer(toRelease) }
+        Timber.d("sherpa online deferred unload finished")
+    }
+
+    /**
+     * native 释放统一放到 IO 线程：设置页切换开关 / 删除模型时若在主线程 free 一个
+     * 600MB 的 ONNX 会话，会直接卡出 ANR 甚至被系统判为无响应而退出。
+     */
+    fun unload() {
+        unloadInternal()
+    }
+
+    private fun unloadInternal(): Job {
+        // 先用 volatile 写把缓存标为失效，不占用主线程去抢加载中的锁。
+        // get() 见到该标记会等释放完成后重建，配置变更因此一定能生效。
+        pendingUnload = true
+        val job = scope.launch {
+            val snapshot = synchronized(this@SherpaOnlineManager) {
+                unloadJob?.cancel()
+                unloadJob = null
+                if (activeSessions > 0 || cached == null) {
+                    null
+                } else {
+                    val old = cached
+                    cached = null
+                    cachedKey = null
+                    old
+                }
+            }
+            snapshot?.let { releaseRecognizer(it) }
+            Timber.d("sherpa online recognizer unloaded (sessions=%d)", activeSessions)
+        }
+        releaseJob = job
+        return job
+    }
+
+    /** 删除模型文件前调用：等 native 释放真正结束后再返回，避免边解码边删文件。 */
+    suspend fun unloadNow() {
+        unloadInternal().join()
     }
 
     private fun createRecognizer(config: Any): Any {
@@ -164,7 +233,8 @@ private class OnlineSession(private val recognizer: Any) {
 
     fun decodeReady() {
         // isReady 为 true 表示有足够特征可以跑一次 decoder；正常每 200ms 块只有 0~1 次。
-        repeat(64) {
+        // 上限放宽到 256：模型加载慢时队列里可能积压十几秒音频，回放时一次追平。
+        repeat(256) {
             if (isReady.invoke(recognizer, stream) as? Boolean != true) return
             decode.invoke(recognizer, stream)
         }
@@ -211,7 +281,14 @@ class StreamingSherpaEngine(
                 .getDeclaredConstructor().newInstance()
             sherpaTrySetField(modelConfig, "transducer", transducer)
             sherpaTrySetField(modelConfig, "tokens", paths.getValue("tokens.txt"))
-            sherpaTrySetField(modelConfig, "numThreads", LocalVoiceSettings.threads(context, VoiceModels.STREAMING_FAMILY))
+            // 省电模式下流式解码固定在单核：Transducer 每 480ms 只跑一个小 chunk，
+            // 多核并行带来的调度/唤醒开销反而比节省的时间更费电。
+            val threads = if (LocalVoiceSettings.isPowerSave(context)) {
+                1
+            } else {
+                LocalVoiceSettings.threads(context, VoiceModels.STREAMING_FAMILY)
+            }
+            sherpaTrySetField(modelConfig, "numThreads", threads)
             sherpaTrySetField(modelConfig, "provider", "cpu")
             sherpaTrySetField(modelConfig, "debug", false)
 
@@ -228,17 +305,18 @@ class StreamingSherpaEngine(
             sherpaTrySetField(config, "maxActivePaths", 4)
             sherpaTrySetField(config, "enableEndpoint", true)
             // endpointConfig 使用库内置的三条默认规则，不显式构造 EndpointRule。
-            return config to fingerprint(model)
+            return config to fingerprint(context, model)
         }
 
-        private fun fingerprint(model: ResolvedVoiceModel): String = buildString {
+        private fun fingerprint(context: Context, model: ResolvedVoiceModel): String = buildString {
             append(VoiceModels.STREAMING_FAMILY).append('|').append(model.dir.absolutePath).append('|')
             model.paths.entries.sortedBy { it.key }.forEach { (name, path) ->
                 val file = File(path)
                 append(name).append('=').append(path)
                 append('(').append(file.length()).append(':').append(file.lastModified()).append(");")
             }
-            append("|online|provider=cpu")
+            append("|online|provider=cpu|powerSave=")
+                .append(LocalVoiceSettings.isPowerSave(context))
         }
     }
 
@@ -265,9 +343,16 @@ class StreamingSherpaEngine(
         totalBytes = 0
         worker = scope.launch(Dispatchers.IO) {
             var online: OnlineSession? = null
+            var sessionHeld = false
             try {
+                // 从这一刻起禁止管理器释放 native 识别器，直到本次会话结束。
+                // 设置页删除模型 / 切换开关时若并发释放，会触发 native use-after-free 直接杀进程。
+                SherpaOnlineManager.beginSession()
+                sessionHeld = true
                 val (config, key) = buildConfig(context, model)
                 val recognizer = SherpaOnlineManager.get(config, key, onLoadStart)
+                // 模型就绪：收起「加载中」，随后回放队列里已缓冲的 PCM，开头语音一个字都不丢。
+                listener.onStatus("")
                 val s = OnlineSession(recognizer)
                 online = s
                 session = s
@@ -300,6 +385,7 @@ class StreamingSherpaEngine(
             } finally {
                 session = null
                 online?.release()
+                if (sessionHeld) SherpaOnlineManager.endSession()
             }
         }
     }

@@ -27,23 +27,41 @@ object VoiceLifecycle {
     fun onKeyboardShown(context: Context) {
         val ctx = context.applicationContext
         if (!followKeyboard(ctx) || !LocalVoiceSettings.isEnabled(ctx)) return
-        preloadJob?.cancel()
         val manager = SherpaOfflineManager.getInstance()
         manager.cancelScheduledUnload()
         SherpaOnlineManager.cancelScheduledUnload()
-        preloadJob = scope.launch {
-            runCatching {
-                val family = LocalVoiceSettings.vendor(ctx)
-                val model = VoiceModels.status(ctx, family).resolved ?: return@launch
-                if (VoiceModels.isStreaming(family)) {
-                    val (config, key) = StreamingSherpaEngine.buildConfig(ctx, model)
-                    SherpaOnlineManager.preload(config, key)
-                } else {
-                    val (config, key) = OfflineSherpaEngine.buildConfig(ctx, family, model)
-                    manager.preload(config, key)
-                }
-            }.onFailure { Timber.w(it, "voice model preload failed") }
-        }
+        // onStartInput 已提前触发过一次时不要重启加载（600MB 模型重启一次代价很高）。
+        if (preloadJob?.isActive == true) return
+        preloadJob = scope.launch { preloadInternal(ctx) }
+    }
+
+    /**
+     * 设置页 / 安装完成 / 切换配置后的预热：这些入口会卸载旧识别器，若只等
+     * onStartInputView，键盘本来就弹着就不会再触发，第一次按语音键仍是冷加载。
+     * 与「跟随键盘」策略无关，只要模型已就绪就后台加载，已加载则直接返回。
+     */
+    fun warmUp(context: Context) {
+        val ctx = context.applicationContext
+        if (!LocalVoiceSettings.isEnabled(ctx)) return
+        if (preloadJob?.isActive == true) return
+        preloadJob = scope.launch { preloadInternal(ctx) }
+    }
+
+    private suspend fun preloadInternal(ctx: Context) {
+        runCatching {
+            val family = LocalVoiceSettings.vendor(ctx)
+            val model = VoiceModels.status(ctx, family).resolved ?: return
+            if (VoiceModels.isStreaming(family)) {
+                val (config, key) = StreamingSherpaEngine.buildConfig(ctx, model)
+                if (SherpaOnlineManager.isLoaded(key)) return
+                SherpaOnlineManager.preload(config, key)
+            } else {
+                val manager = SherpaOfflineManager.getInstance()
+                val (config, key) = OfflineSherpaEngine.buildConfig(ctx, family, model)
+                if (manager.isLoaded(key)) return
+                manager.preload(config, key)
+            }
+        }.onFailure { Timber.w(it, "voice model preload failed") }
     }
 
     /** 键盘隐藏：延迟卸载；期间再次唤起键盘会取消这次卸载。 */

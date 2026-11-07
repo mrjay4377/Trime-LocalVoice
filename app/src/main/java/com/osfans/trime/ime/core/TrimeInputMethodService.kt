@@ -545,6 +545,9 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     ) {
         composingText = ""
         Timber.d("onStartInput: restarting=$restarting")
+        // 输入框获得焦点时就开始预热，比键盘真正弹出早几百毫秒到几秒；
+        // 600MB 级流式模型首次建会话较慢，这段提前量决定「按住就能出字」。
+        VoiceLifecycle.onKeyboardShown(this)
         val isNullType = attribute.inputType and InputType.TYPE_MASK_CLASS == InputType.TYPE_NULL
         postRimeJob {
             if (restarting) {

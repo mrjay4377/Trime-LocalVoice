@@ -11,6 +11,9 @@ interface AsrListener {
     fun onError(message: String)
 
     fun onPartial(text: String) {}
+
+    /** 阶段性状态（例如「模型加载中，已缓冲 X 秒」）；空串表示收起。 */
+    fun onStatus(text: String) {}
 }
 
 interface AsrEngine {
