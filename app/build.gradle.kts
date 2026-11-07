@@ -119,6 +119,8 @@ android {
                 )
         }
         jniLibs {
+            // 说点啥 v4.6.0 用 useLegacyPackaging 压缩 native 库减包；本分支实测 .so
+            // 在默认配置下已经是 deflate 压缩，强开该选项无收益，故保持默认不改运行时行为。
             // Java 层只 System.loadLibrary("sherpa-onnx-jni")，该 so 已静态包含 C API 实现
             // 且 DT_NEEDED 仅为 libonnxruntime.so；c-api / cxx-api 供外部 C/C++ 调用者使用，
             // 输入法用不到，排除后可少打约 2 MiB。
@@ -149,6 +151,10 @@ dependencies {
     ksp(project(":codegen"))
     // 本地语音输入（Qwen3-ASR 等）：sherpa-onnx 本地推理引擎（Apache-2.0，来自 BiBi-Keyboard）
     implementation(files("libs/sherpa-onnx-2.0.1.aar"))
+    // 离线翻译 Foxlet Translate 0.5.0（Bergamot / Marian + Mozilla 模型，MIT / MPL-2.0）。
+    // AAR 声明 minSdk 28，而本分支 minSdk 21，故只取 classes.jar 与 arm64 native 库，
+    // 运行时在 API 28+ 才启用（见 OfflineTranslator.isAvailable）。
+    implementation(files("libs/foxlet-0.5.0-classes.jar"))
     implementation(libs.kotlinx.coroutines)
     implementation(libs.kotlinx.serialization.json)
     // WebDAV 需要 PROPFIND / MKCOL，Android 内置 HttpURLConnection 不支持这些动词；

@@ -75,9 +75,12 @@ object LocalVoiceSettings {
         runCatching { SherpaOfflineManager.getInstance().unload() }
     }
 
-    /** <0 常驻内存；0 即用即卸；>0 N 分钟后自动卸载。默认常驻，避免每次重新加载大模型。 */
+    /**
+     * -1 常驻内存；-2 跟随键盘（打开时预加载 / 关闭后延迟卸载）；0 即用即卸；>0 N 分钟后卸载。
+     * 默认跟随键盘：既不用每次重新加载大模型，也不会在键盘收起后一直占着内存。
+     */
     fun keepAliveMinutes(context: Context, family: String): Int =
-        prefs(context).getInt("loc.$family.keep_alive", -1)
+        prefs(context).getInt("loc.$family.keep_alive", MODE_FOLLOW_KEYBOARD)
 
     fun setKeepAliveMinutes(context: Context, family: String, value: Int) {
         prefs(context).edit().putInt("loc.$family.keep_alive", value).apply()
@@ -108,4 +111,35 @@ object LocalVoiceSettings {
             .apply()
 
     private val OUTPUT_CONVERSIONS = setOf("off", "s2t", "s2tw", "s2hk", "t2s", "auto")
+
+    /** 模型驻留策略中的「跟随键盘」档：-2 = 打开键盘预加载、关闭后延迟卸载。 */
+    const val MODE_FOLLOW_KEYBOARD = -2
+
+    /** 键盘关闭后延迟卸载的分钟数，默认 3 分钟。 */
+    fun unloadDelayMinutes(context: Context): Int =
+        prefs(context).getInt("unload_delay", 3).coerceIn(1, 60)
+
+    fun setUnloadDelayMinutes(context: Context, value: Int) =
+        prefs(context).edit().putInt("unload_delay", value.coerceIn(1, 60)).apply()
+
+    /** 语音输入后离线翻译（Foxlet / Mozilla 模型），默认关闭。 */
+    fun isTranslateEnabled(context: Context): Boolean =
+        prefs(context).getBoolean("translate_enabled", false)
+
+    fun setTranslateEnabled(context: Context, value: Boolean) =
+        prefs(context).edit().putBoolean("translate_enabled", value).apply()
+
+    fun translateDirection(context: Context): String {
+        val saved = prefs(context).getString("translate_direction", "auto") ?: "auto"
+        return if (saved in TRANSLATE_DIRECTIONS) saved else "auto"
+    }
+
+    fun setTranslateDirection(context: Context, value: String) =
+        prefs(context).edit()
+            .putString("translate_direction", if (value in TRANSLATE_DIRECTIONS) value else "auto")
+            .apply()
+
+    private val TRANSLATE_DIRECTIONS = setOf(
+        "auto", "zh_en", "en_zh", "zh_ja", "zh_ko", "zh_fr", "zh_de", "zh_es", "zh_ru",
+    )
 }

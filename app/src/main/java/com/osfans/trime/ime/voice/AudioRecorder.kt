@@ -37,12 +37,16 @@ class AudioRecorder(
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
                 PackageManager.PERMISSION_GRANTED
 
-        fun pcmLevel(pcm: ByteArray, size: Int = pcm.size): Float {
-            val count = minOf(size, pcm.size) / 2
-            if (count == 0) return 0f
+        fun pcmLevel(pcm: ByteArray, size: Int = pcm.size): Float = pcmLevel(pcm, 0, size)
+
+        /** 带偏移的音量计算，供空音频判定逐块扫描，避免为每块复制数组。 */
+        fun pcmLevel(pcm: ByteArray, offset: Int, size: Int): Float {
+            val count = minOf(size, pcm.size - offset) / 2
+            if (count <= 0) return 0f
             var energy = 0.0
             for (i in 0 until count) {
-                val sample = ((pcm[i * 2].toInt() and 255) or (pcm[i * 2 + 1].toInt() shl 8))
+                val p = offset + i * 2
+                val sample = ((pcm[p].toInt() and 255) or (pcm[p + 1].toInt() shl 8))
                     .toShort().toDouble() / 32768.0
                 energy += sample * sample
             }

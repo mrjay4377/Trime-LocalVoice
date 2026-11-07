@@ -153,6 +153,46 @@ internal class SherpaOfflineManager {
     @Volatile
     private var unloadJob: Job? = null
 
+    fun cancelScheduledUnload() {
+        unloadJob?.cancel()
+        unloadJob = null
+    }
+
+    /** 键盘隐藏后延迟释放；期间用户再次唤起键盘会取消这次卸载。 */
+    fun scheduleUnload(delayMs: Long) {
+        unloadJob?.cancel()
+        unloadJob = scope.launch {
+            delay(delayMs.coerceAtLeast(1_000L))
+            unload()
+        }
+        Timber.d("sherpa offline unload scheduled in %d ms", delayMs)
+    }
+
+    /**
+     * 只创建识别器、不做解码，供「键盘弹出时预加载」使用。
+     * 与 decodeOffline 共用互斥锁和缓存指纹，预加载过的模型下次识别直接命中缓存。
+     */
+    suspend fun preload(config: Any, key: String) {
+        mutex.withLock {
+            val cached = cachedRecognizer
+            if (cached != null && cachedKey == key) {
+                unloadJob?.cancel()
+                unloadJob = null
+                return@withLock
+            }
+            cached?.release()
+            cachedRecognizer = null
+            cachedConfig = null
+            cachedKey = null
+            val native = createRecognizer(config)
+            val raw = ReflectiveRecognizer(native, native.javaClass)
+            cachedRecognizer = raw
+            cachedConfig = config
+            cachedKey = key
+            Timber.i("sherpa offline model preloaded")
+        }
+    }
+
     fun unload() {
         val snapshot = cachedRecognizer ?: return
         scope.launch {
@@ -189,7 +229,8 @@ internal class SherpaOfflineManager {
         onLoadStart: (() -> Unit)? = null,
         onLoadDone: (() -> Unit)? = null,
     ): String? {
-        check(mutex.tryLock()) { "上一次本地识别仍在处理中，请稍后重试" }
+        // 键盘预加载可能正在持锁；等待它完成比直接抛错更稳（说点啥统一交付流程的做法）。
+        mutex.lock()
         val began = SystemClock.elapsedRealtime()
         return try {
             val cached = cachedRecognizer
@@ -218,8 +259,10 @@ internal class SherpaOfflineManager {
                 stream.acceptWaveform(samples, sampleRate)
                 val text = recognizer.decode(stream)
                 Timber.i("sherpa decode done in %d ms, chars=%d", SystemClock.elapsedRealtime() - began, text?.length ?: 0)
-                unloadJob?.cancel()
+                // 跟随键盘档（alwaysKeep）的卸载由 VoiceLifecycle 在键盘隐藏时安排，
+                // 这里不能顺手 cancel，否则识别一次之后模型就再也不会卸载了。
                 if (!alwaysKeep) {
+                    unloadJob?.cancel()
                     if (keepAliveMs <= 0L) {
                         unload()
                     } else {
@@ -254,6 +297,26 @@ class OfflineSherpaEngine(
     private val onLoadStart: () -> Unit = {},
     private val onLoadDone: () -> Unit = {},
 ) : AsrEngine {
+    companion object {
+        private val probeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val probeListener =
+            object : AsrListener {
+                override fun onFinal(text: String) {}
+
+                override fun onError(message: String) {}
+            }
+
+        /** 键盘预加载复用同一套 config 构造与缓存指纹，避免两份实现走偏。 */
+        internal fun buildConfig(
+            context: Context,
+            familyId: String,
+            model: ResolvedVoiceModel,
+        ): Pair<Any, String> {
+            val probe = OfflineSherpaEngine(context, probeScope, probeListener, familyId, model)
+            return probe.buildRecognizerConfig(model.paths) to probe.configFingerprint()
+        }
+    }
+
     private val running = AtomicBoolean(false)
     private val buffer = ByteArrayOutputStream()
     private var decodeJob: Job? = null
@@ -288,6 +351,13 @@ class OfflineSherpaEngine(
             )
             if (pcm.size < 3200) {
                 listener.onError("录音太短，请按住语音键说完再松手")
+                return@launch
+            }
+            // 说点啥 v4.6.0 的「空音频判定」：纯静音直接拦下，不加载模型也不产生幻觉文字。
+            val vad = VoiceActivity.analyze(pcm)
+            Timber.i("voice activity: peak=%.2f active=%d/%d", vad.peak, vad.activeBlocks, vad.blocks)
+            if (!vad.hasSpeech) {
+                listener.onError("没有检测到语音，请靠近麦克风后重试")
                 return@launch
             }
             try {

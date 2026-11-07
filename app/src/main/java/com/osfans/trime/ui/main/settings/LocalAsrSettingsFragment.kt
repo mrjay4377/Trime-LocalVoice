@@ -46,8 +46,10 @@ import com.osfans.trime.ime.voice.LocalVoiceSettings
 import com.osfans.trime.ime.voice.ModelCatalog
 import com.osfans.trime.ime.voice.ModelInstaller
 import com.osfans.trime.ime.voice.ModelVariant
+import com.osfans.trime.ime.voice.OfflineTranslator
 import com.osfans.trime.ime.voice.VoiceModels
 import com.osfans.trime.ui.common.PaddingPreferenceFragment
+import io.github.yinvoker.foxlet.LanguagePair
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -75,6 +77,10 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     private var sourcePreference: Preference? = null
     private var itnPreference: SwitchPreferenceCompat? = null
     private var conversionPreference: ListPreference? = null
+    private var translatePreference: SwitchPreferenceCompat? = null
+    private var translateDirectionPreference: ListPreference? = null
+    private var translatePacksPreference: Preference? = null
+    private var unloadDelayPreference: ListPreference? = null
     private var modelsPreference: Preference? = null
     private var deletePreference: Preference? = null
     private var installJob: Job? = null
@@ -311,6 +317,51 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             )
 
             addPreference(
+                SwitchPreferenceCompat(ctx).apply {
+                    key = KEY_TRANSLATE
+                    title = "语音输入后翻译（离线）"
+                    summary = "识别结果先本地翻译再上屏 · 首次需下载语言包"
+                    isIconSpaceReserved = false
+                    isChecked = LocalVoiceSettings.isTranslateEnabled(ctx)
+                    translatePreference = this
+                    setOnPreferenceChangeListener { _, newValue ->
+                        LocalVoiceSettings.setTranslateEnabled(ctx, newValue as Boolean)
+                        refresh(ctx)
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                ListPreference(ctx).apply {
+                    key = KEY_TRANSLATE_DIRECTION
+                    title = "翻译方向"
+                    entries = OfflineTranslator.DIRECTION_LABELS
+                    entryValues = OfflineTranslator.DIRECTION_VALUES
+                    isIconSpaceReserved = false
+                    translateDirectionPreference = this
+                    setOnPreferenceChangeListener { _, newValue ->
+                        LocalVoiceSettings.setTranslateDirection(ctx, newValue as String)
+                        refresh(ctx)
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                Preference(ctx).apply {
+                    key = KEY_TRANSLATE_PACKS
+                    title = "离线翻译语言包"
+                    isIconSpaceReserved = false
+                    translatePacksPreference = this
+                    setOnPreferenceClickListener {
+                        showTranslationPacks(ctx)
+                        true
+                    }
+                },
+            )
+
+            addPreference(
                 ListPreference(ctx).apply {
                     key = KEY_KEEP_ALIVE
                     title = "模型驻留内存"
@@ -324,6 +375,22 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                             LocalVoiceSettings.vendor(ctx),
                             (newValue as String).toInt(),
                         )
+                        refresh(ctx)
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                ListPreference(ctx).apply {
+                    key = KEY_UNLOAD_DELAY
+                    title = "关闭键盘后延迟卸载"
+                    entries = UNLOAD_DELAY_LABELS
+                    entryValues = UNLOAD_DELAY_VALUES
+                    isIconSpaceReserved = false
+                    unloadDelayPreference = this
+                    setOnPreferenceChangeListener { _, newValue ->
+                        LocalVoiceSettings.setUnloadDelayMinutes(ctx, (newValue as String).toInt())
                         refresh(ctx)
                         true
                     }
@@ -389,6 +456,83 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_MIC) context?.let(::refresh)
+    }
+
+    /** 离线翻译语言包：查看当前方向所需语向的就绪状态，可下载 / 删除。 */
+    private fun showTranslationPacks(ctx: Context) {
+        if (!OfflineTranslator.isAvailable()) {
+            AlertDialog.Builder(ctx)
+                .setTitle("离线翻译语言包")
+                .setMessage("当前设备不支持离线翻译：需要 Android 9 及以上、64 位 arm64 设备。")
+                .setPositiveButton(android.R.string.ok, null)
+                .show()
+            return
+        }
+        val direction = LocalVoiceSettings.translateDirection(ctx)
+        val pairs = OfflineTranslator.pairsFor(direction)
+        val label = OfflineTranslator.chain(direction, true).label
+        lifecycleScope.launch(Dispatchers.IO) {
+            val states = pairs.map { it to (OfflineTranslator.installed(ctx, it) != null) }
+            withContext(Dispatchers.Main) {
+                val body =
+                    buildString {
+                        append("当前方向：").append(label).appendLine()
+                        states.forEach { (pair, ready) ->
+                            append(if (ready) "✓ " else "○ ")
+                            append(pair.source).append(" → ").append(pair.target)
+                            append(if (ready) "  已就绪" else "  未下载（约 50 MiB）")
+                            appendLine()
+                        }
+                        appendLine()
+                        append("模型来自 Mozilla Firefox Translations（MPL-2.0）。首次需联网下载，之后翻译全程离线；翻译未就绪时自动按原文上屏。")
+                    }
+                AlertDialog.Builder(ctx)
+                    .setTitle("离线翻译语言包")
+                    .setMessage(body)
+                    .setPositiveButton("下载 / 检查") { _, _ -> downloadTranslationPacks(ctx, pairs) }
+                    .setNeutralButton("删除语言包") { _, _ -> deleteTranslationPacks(ctx, pairs) }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
+        }
+    }
+
+    private fun downloadTranslationPacks(
+        ctx: Context,
+        pairs: List<LanguagePair>,
+    ) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val dialog =
+                withContext(Dispatchers.Main) {
+                    AlertDialog.Builder(ctx)
+                        .setTitle("正在准备离线语言包")
+                        .setMessage("下载中，请保持网络连接…\n每套约 50 MiB，首次可能需要几分钟。")
+                        .setCancelable(false)
+                        .show()
+                }
+            var ready = 0
+            for (pair in pairs) {
+                if (OfflineTranslator.prepare(ctx, pair) != null) ready++
+            }
+            withContext(Dispatchers.Main) {
+                runCatching { dialog.dismiss() }
+                Toast.makeText(ctx, "语言包就绪 $ready / ${pairs.size} 套", Toast.LENGTH_SHORT).show()
+                refresh(ctx)
+            }
+        }
+    }
+
+    private fun deleteTranslationPacks(
+        ctx: Context,
+        pairs: List<LanguagePair>,
+    ) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            for (pair in pairs) OfflineTranslator.delete(ctx, pair)
+            withContext(Dispatchers.Main) {
+                Toast.makeText(ctx, "已删除所选方向的语言包", Toast.LENGTH_SHORT).show()
+                refresh(ctx)
+            }
+        }
     }
 
     /** 统一分组样式：不占图标位，标题不与组内第一项重名。 */
@@ -971,11 +1115,35 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             val label = CONVERSION_SHORT[CONVERSION_VALUES.indexOf(conversion).coerceAtLeast(0)]
             summary = "当前：$label\n仅影响语音上屏文字，打字不受影响"
         }
+        val translateOn = LocalVoiceSettings.isTranslateEnabled(ctx)
+        translatePreference?.isChecked = translateOn
+        translateDirectionPreference?.apply {
+            isVisible = translateOn
+            val d = LocalVoiceSettings.translateDirection(ctx)
+            value = d
+            summary = "当前：${OfflineTranslator.DIRECTION_LABELS[OfflineTranslator.DIRECTION_VALUES.indexOf(d).coerceAtLeast(0)]}"
+        }
+        translatePacksPreference?.apply {
+            isVisible = translateOn
+            summary =
+                if (!OfflineTranslator.isAvailable()) {
+                    "当前设备不支持（需 Android 9+ / arm64）"
+                } else {
+                    val n = OfflineTranslator.pairsFor(LocalVoiceSettings.translateDirection(ctx)).size
+                    "当前方向需要 $n 套语言包 · 点击下载 / 删除 / 查看状态"
+                }
+        }
         val keepAlive = LocalVoiceSettings.keepAliveMinutes(ctx, family).toString()
         keepAlivePreference?.apply {
             val v = if (keepAlive in KEEP_ALIVE_VALUES) keepAlive else "-1"
             value = v
             summary = "当前：${KEEP_ALIVE_LABELS[KEEP_ALIVE_VALUES.indexOf(v)]}"
+        }
+        unloadDelayPreference?.apply {
+            isVisible = keepAlive == LocalVoiceSettings.MODE_FOLLOW_KEYBOARD.toString()
+            val v = LocalVoiceSettings.unloadDelayMinutes(ctx).toString()
+            value = v
+            summary = "当前：键盘关闭 $v 分钟后卸载"
         }
 
         val source = LocalVoiceSettings.downloadSource(ctx)
@@ -1080,6 +1248,10 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         const val KEY_ITN = "lv_itn"
         const val KEY_OUTPUT_CONVERSION = "lv_output_conversion"
         const val KEY_KEEP_ALIVE = "lv_keep_alive"
+        const val KEY_UNLOAD_DELAY = "lv_unload_delay"
+        const val KEY_TRANSLATE = "lv_translate"
+        const val KEY_TRANSLATE_DIRECTION = "lv_translate_direction"
+        const val KEY_TRANSLATE_PACKS = "lv_translate_packs"
         const val KEY_SAVE_RECORDING = "lv_save_recording"
         const val KEY_USAGE = "lv_usage"
         const val BIBI_REPO_URL = "https://github.com/BryceWG/BiBi-Keyboard"
@@ -1109,13 +1281,22 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             "跟随输入法简/繁开关",
         )
         val CONVERSION_SHORT = CONVERSION_LABELS
-        val KEEP_ALIVE_VALUES = arrayOf("-1", "0", "5", "15", "30")
+        val KEEP_ALIVE_VALUES = arrayOf("-1", "-2", "0", "5", "15", "30")
         val KEEP_ALIVE_LABELS = arrayOf(
             "常驻内存（最快）",
+            "跟随键盘：打开时预加载 / 关闭后延迟卸载",
             "用完即卸载（最省内存）",
             "空闲 5 分钟后卸载",
             "空闲 15 分钟后卸载",
             "空闲 30 分钟后卸载",
+        )
+        val UNLOAD_DELAY_VALUES = arrayOf("1", "3", "5", "10", "30")
+        val UNLOAD_DELAY_LABELS = arrayOf(
+            "1 分钟",
+            "3 分钟（推荐）",
+            "5 分钟",
+            "10 分钟",
+            "30 分钟",
         )
     }
 }

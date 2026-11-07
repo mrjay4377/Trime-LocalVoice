@@ -41,3 +41,9 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Foxlet Translate 0.5.0 以 classes.jar 引入，AAR 内的 proguard.txt 不会自动生效。
+# native 层通过 JNI 反向查找 NativeBridge / JniRuntime 的方法，类名与成员名必须保留。
+-keep class io.github.yinvoker.foxlet.NativeBridge { *; }
+-keep class io.github.yinvoker.foxlet.JniRuntime { *; }
+-dontwarn io.github.yinvoker.foxlet.**

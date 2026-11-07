@@ -7,6 +7,9 @@ package com.osfans.trime.ime.core
 
 import android.annotation.SuppressLint
 import android.app.Dialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
@@ -14,6 +17,8 @@ import android.graphics.RectF
 import android.inputmethodservice.InputMethodService
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.view.InputDevice
@@ -49,6 +54,7 @@ import com.osfans.trime.data.theme.ThemeManager
 import com.osfans.trime.data.theme.ThemeScope
 import com.osfans.trime.ime.composition.CandidatesView
 import com.osfans.trime.ime.keyboard.InputFeedbackManager
+import com.osfans.trime.ime.voice.VoiceLifecycle
 import com.osfans.trime.receiver.RimeIntentReceiver
 import com.osfans.trime.util.any
 import com.osfans.trime.util.findSectionFrom
@@ -331,6 +337,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     }
 
     override fun onDestroy() {
+        VoiceLifecycle.onDestroy()
         InputFeedbackManager.destroy()
         inputView = null
         recreateInputViewPrefs.forEach {
@@ -568,6 +575,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         restarting: Boolean,
     ) {
         Timber.d("onStartInputView: restarting=$restarting")
+        VoiceLifecycle.onKeyboardShown(this)
         InputFeedbackManager.startInput()
         postRimeJob {
             updateRimeOption(this)
@@ -591,6 +599,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
 
     override fun onFinishInputView(finishingInput: Boolean) {
         Timber.d("onFinishInputView: finishingInput=$finishingInput")
+        VoiceLifecycle.onKeyboardHidden(this)
         decorLocationUpdated = false
         inputView?.dismissCandidateActionMenu()
         candidatesView?.dismissCandidateActionMenu()
@@ -609,20 +618,61 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     /**
      * 当前 Rime 是否处于繁体输出状态，供本地语音「跟随输入法简/繁」档位读取。
      *
-     * 注意：librime 的 `RimeStatus.is_traditional` 读的是名为 `traditional` 的 option，
-     * 但同文各方案实际用的是 `simplification`（开 = 简体，关 = 繁体 / 漢字）。
-     * 只读前者在多数方案里恒为 false，会让跟随档永远输出简体；这里直接读 option，
-     * 不依赖 statusCached 的事件更新。Rime 未就绪时按简体处理。
+     * librime 对**未定义**的 option 一律返回 false（见 rime_api_impl.h 中
+     * `is_simplified = get_option("simplification")`）。若直接写
+     * `traditional || !simplification`，方案里没有 simplification 开关时就会恒为 true，
+     * 表现为「跟随档永远输出繁体」。因此先查当前方案的 switches，确认开关真实存在再取值；
+     * 两种开关都没有时按简体处理（与键盘默认显示「汉字」一致）。
      */
     val isTraditionalMode: Boolean
         get() = runCatching {
             if (!::rime.isInitialized) return@runCatching false
             rime.run {
-                val traditional = getRuntimeOption("traditional")
-                val simplified = getRuntimeOption("simplification")
-                traditional || !simplified
+                val names = currentSchema().switches
+                    .flatMap { listOf(it.name) + it.options }
+                    .filter { it.isNotBlank() }
+                    .toSet()
+                when {
+                    "simplification" in names -> !getRuntimeOption("simplification")
+                    "traditional" in names -> getRuntimeOption("traditional")
+                    else -> false
+                }
             }
         }.getOrDefault(false)
+
+    /**
+     * 语音/翻译结果上屏：说点啥 v4.6.0 把听写结果写入统一做了重试，这里对齐。
+     * 输入法刚唤起或目标 App 切换输入框时 InputConnection 可能短暂为 null，
+     * 直接 commit 会丢字；重试仍失败时把结果放进剪贴板，避免整句丢失。
+     */
+    private val voiceCommitHandler = Handler(Looper.getMainLooper())
+
+    fun commitVoiceText(
+        text: String,
+        onFailed: ((String) -> Unit)? = null,
+    ) {
+        fun attempt(remaining: Int) {
+            val ok = runCatching {
+                if (currentInputConnection == null) {
+                    false
+                } else {
+                    commitText(text)
+                    true
+                }
+            }.onFailure { Timber.w(it, "voice commit failed") }.getOrDefault(false)
+            if (ok) return
+            if (remaining > 0) {
+                voiceCommitHandler.postDelayed({ attempt(remaining - 1) }, 80L)
+            } else {
+                runCatching {
+                    (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                        .setPrimaryClip(ClipData.newPlainText("语音识别结果", text))
+                }
+                onFailed?.invoke("上屏失败，结果已复制到剪贴板")
+            }
+        }
+        attempt(3)
+    }
 
     fun commitText(text: String) {
         val ic = currentInputConnection ?: return

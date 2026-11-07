@@ -120,21 +120,47 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
                                 "没有识别到文字：请确认 voice 目录里的模型与所选引擎匹配"
                             }
                         notice(hint)
-                    } else {
-                        // 上屏前按设置做离线简繁转换；转换失败时 ChineseConverter 原样返回。
-                        val mode = LocalVoiceSettings.outputConversion(service)
-                        val output = ChineseConverter.convert(
-                            service, text, mode, service.isTraditionalMode,
-                        )
-                        Timber.i(
-                            "LocalVoice commit %d -> %d chars, mode=%s (%.1fs audio)",
-                            text.length, output.length, mode, session.seconds,
-                        )
-                        dismissNotice()
-                        runCatching { service.commitText(output) }
-                            .onFailure { Timber.w(it, "LocalVoice commitText failed") }
+                        cleanup(session)
+                        return@post
                     }
-                    cleanup(session)
+                    // 上屏前按设置做离线简繁转换；转换失败时 ChineseConverter 原样返回。
+                    val mode = LocalVoiceSettings.outputConversion(service)
+                    val original = ChineseConverter.convert(
+                        service, text, mode, service.isTraditionalMode,
+                    )
+                    Timber.i(
+                        "LocalVoice result %d -> %d chars, mode=%s (%.1fs audio)",
+                        text.length, original.length, mode, session.seconds,
+                    )
+
+                    fun deliver(output: String, fallbackNotice: String?) {
+                        dismissNotice()
+                        service.commitVoiceText(output) { msg -> notice(msg) }
+                        if (fallbackNotice != null) notice(fallbackNotice)
+                        cleanup(session)
+                    }
+
+                    val translateOn = LocalVoiceSettings.isTranslateEnabled(service)
+                    if (translateOn && OfflineTranslator.isAvailable()) {
+                        notice("正在离线翻译…")
+                        val direction = LocalVoiceSettings.translateDirection(service)
+                        scope.launch {
+                            val translated = OfflineTranslator.translate(service, original, direction)
+                            main.post {
+                                if (current !== session) return@post
+                                deliver(
+                                    translated ?: original,
+                                    if (translated == null) {
+                                        "离线翻译未就绪，已按原文上屏 · 请在设置里下载语言包"
+                                    } else {
+                                        null
+                                    },
+                                )
+                            }
+                        }
+                    } else {
+                        deliver(original, null)
+                    }
                 }
             }
 
@@ -224,12 +250,12 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
                 }
             }
         }
-        // 识别结果迟迟不返回时兜底释放会话。
+        // 识别 / 翻译结果迟迟不返回时兜底释放会话（首次翻译要加载模型，放宽到 5 分钟）。
         session.timeoutJob = scope.launch {
-            delay(120_000)
+            delay(300_000)
             main.post {
                 if (current === session && !session.finished) {
-                    notice("识别超时，请检查模型文件与可用内存")
+                    notice("识别或翻译超时，请检查模型文件与可用内存")
                     session.finished = true
                     cleanup(session)
                 }
