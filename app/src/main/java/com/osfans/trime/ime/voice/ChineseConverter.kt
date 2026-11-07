@@ -18,6 +18,7 @@ object ChineseConverter {
     const val MODE_OFF = "off"
     const val MODE_S2T = "s2t"
     const val MODE_S2TW = "s2tw"
+    const val MODE_S2HK = "s2hk"
     const val MODE_T2S = "t2s"
     const val MODE_AUTO = "auto"
 
@@ -35,6 +36,7 @@ object ChineseConverter {
     private class Tables(
         val s2t: Chain,
         val tw: Chain,
+        val hk: Chain,
         val t2s: Chain,
     )
 
@@ -69,15 +71,17 @@ object ChineseConverter {
     ): String {
         if (text.isEmpty()) return text
         val effective = when (mode) {
-            MODE_S2T, MODE_S2TW, MODE_T2S -> mode
+            MODE_S2T, MODE_S2TW, MODE_S2HK, MODE_T2S -> mode
             MODE_AUTO -> if (isTraditional) MODE_S2T else MODE_T2S
             else -> return text
         }
         return runCatching {
             val tables = load(context.applicationContext)
             when (effective) {
+                // 台湾 / 香港与 OpenCC s2tw.json / s2hk.json 一致：先通用简→繁，再套地域字形。
                 MODE_S2T -> apply(text, tables.s2t)
                 MODE_S2TW -> apply(apply(text, tables.s2t), tables.tw)
+                MODE_S2HK -> apply(apply(text, tables.s2t), tables.hk)
                 MODE_T2S -> apply(text, tables.t2s)
                 else -> text
             }
@@ -128,6 +132,7 @@ object ChineseConverter {
         return Tables(
             s2t = chain("S2T_DIFF", "S2T_SHIELD", "S2T_CHAR"),
             tw = chain("TW_DIFF", "TW_SHIELD", "TW_CHAR"),
+            hk = chain("HK_DIFF", "HK_SHIELD", "HK_CHAR"),
             t2s = chain("T2S_DIFF", "T2S_SHIELD", "T2S_CHAR"),
         )
     }

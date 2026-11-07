@@ -293,7 +293,7 @@
     <string name="local_asr_progress">%1$s %2$d%%\n%3$s</string>
     <string name="local_asr_save_recording">保存最近一次录音</string>
     <string name="local_asr_save_recording_summary">保存为 voice/last_recording.wav，便于排查</string>
-    <string name="local_asr_usage">使用方式</string>
-    <string name="local_asr_usage_summary">按住语音键（默认长按空格）开始录音，候选栏显示麦克风标注；松手即结束并识别上屏，滑出按键可取消；满 2 分钟自动结束。首次使用需授予麦克风权限，并在「模型下载与管理」中安装本地模型（APK 不含模型，识别过程不联网）</string>
+    <string name="local_asr_usage">使用说明</string>
+    <string name="local_asr_usage_summary">按住语音键（默认长按空格）开始录音，候选栏显示麦克风标注；松手即结束并识别上屏，滑出按键可取消；满 2 分钟自动结束。首次使用需授予麦克风权限，并在「模型」分组安装本地模型（APK 不含模型，识别过程不联网）。\n\n── 致谢与开源 ──\n本功能的本地语音识别方法（引擎抽象、录音、模型目录、下载安装与 ZIP 导入）参考并移植自「说点啥（BiBi Keyboard）」，感谢作者 BryceWG 及所有贡献者，项目以 Apache-2.0 开源：\nhttps://github.com/BryceWG/BiBi-Keyboard\n\n语音设置交互参考「咩版」trime-mie；离线模型来自 sherpa-onnx（k2-fsa）与 BiBi 的 models release；简繁 / 台湾 / 香港字典来自 OpenCC（Apache-2.0）；输入法内核基于同文输入法 osfans/trime（GPL-3.0）。\n\n本分支同样开源：\nhttps://github.com/mrjay4377/Trime-LocalVoice</string>
     <string name="local_asr_model_root">模型目录：%1$s</string>
 </resources>

@@ -89,12 +89,16 @@ def main():
     s2t_chars_all = load("STCharacters.txt")
     t2s_chars_all = load("TSCharacters.txt")
     tw_chars_all = load("TWVariants.txt")
+    hk_chars_all = load("HKVariants.txt")
 
     s2t_diff, s2t_shield = split_dictionary(load("STPhrases.txt"), s2t_chars_all)
     t2s_diff, t2s_shield = split_dictionary(load("TSPhrases.txt"), t2s_chars_all)
-    # TW variants are tiny; keep all of them as explicit mappings.
+    # Regional variants are tiny; keep all of them as explicit mappings.
+    # s2tw.json / s2hk.json apply them as a second chain after the s2t chain.
     tw_diff = load("TWVariantsPhrases.txt")
     tw_shield = []
+    hk_diff = load("HKVariantsPhrases.txt")
+    hk_shield = []
 
     s2t_chars, extra = split_chars(s2t_chars_all)
     s2t_diff.update(extra)
@@ -102,6 +106,8 @@ def main():
     t2s_diff.update(extra)
     tw_chars, extra = split_chars(tw_chars_all)
     tw_diff.update(extra)
+    hk_chars, extra = split_chars(hk_chars_all)
+    hk_diff.update(extra)
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with io.open(OUT, "w", encoding="utf-8", newline="\n") as out:
@@ -119,6 +125,9 @@ def main():
             emit_map(out, "TW_DIFF", tw_diff),
             emit_keys(out, "TW_SHIELD", tw_shield),
             emit_map(out, "TW_CHAR", tw_chars),
+            emit_map(out, "HK_DIFF", hk_diff),
+            emit_keys(out, "HK_SHIELD", hk_shield),
+            emit_map(out, "HK_CHAR", hk_chars),
             emit_map(out, "T2S_DIFF", t2s_diff),
             emit_keys(out, "T2S_SHIELD", t2s_shield),
             emit_map(out, "T2S_CHAR", t2s_chars),
@@ -126,7 +135,8 @@ def main():
 
     print("wrote %s (%d bytes)" % (OUT, os.path.getsize(OUT)))
     print(
-        "s2t diff=%d shield=%d char=%d | tw diff=%d shield=%d char=%d | t2s diff=%d shield=%d char=%d"
+        "s2t diff=%d shield=%d char=%d | tw diff=%d shield=%d char=%d | "
+        "hk diff=%d shield=%d char=%d | t2s diff=%d shield=%d char=%d"
         % tuple(counts)
     )
 

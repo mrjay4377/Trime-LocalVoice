@@ -12,6 +12,7 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.net.Uri
@@ -296,7 +297,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             addPreference(
                 ListPreference(ctx).apply {
                     key = KEY_OUTPUT_CONVERSION
-                    title = "输出字形"
+                    title = "简繁转换"
                     entries = CONVERSION_LABELS
                     entryValues = CONVERSION_VALUES
                     isIconSpaceReserved = false
@@ -355,6 +356,17 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                             .setTitle(R.string.local_asr_usage)
                             .setMessage(R.string.local_asr_usage_summary)
                             .setPositiveButton(android.R.string.ok, null)
+                            .setNeutralButton("开源项目") { _, _ ->
+                                // 直接打开「说点啥」仓库，方便查看原项目与许可。
+                                runCatching {
+                                    ctx.startActivity(
+                                        Intent(
+                                            Intent.ACTION_VIEW,
+                                            Uri.parse(BIBI_REPO_URL),
+                                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                    )
+                                }
+                            }
                             .show()
                         true
                     }
@@ -1070,6 +1082,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         const val KEY_KEEP_ALIVE = "lv_keep_alive"
         const val KEY_SAVE_RECORDING = "lv_save_recording"
         const val KEY_USAGE = "lv_usage"
+        const val BIBI_REPO_URL = "https://github.com/BryceWG/BiBi-Keyboard"
         val THREAD_VALUES = arrayOf("1", "2", "3", "4", "6", "8")
         /** 空串 = 自动识别（与 LocalVoiceSettings.language 默认值、引擎 ifBlank{"auto"} 一致）。 */
         val LANGUAGE_VALUES = arrayOf("", "zh", "en", "ja", "ko", "yue")
@@ -1085,22 +1098,17 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         val LANGUAGE_FAMILIES = setOf("sensevoice", "funasr_nano")
         /** 引擎里真正读取 ITN 的家族；其余家族隐藏该开关，避免给出无效选项。 */
         val ITN_FAMILIES = LANGUAGE_FAMILIES
-        /** 语音结果的字形转换；顺序与 ChineseConverter.MODE_* 一致。 */
-        val CONVERSION_VALUES = arrayOf("off", "s2t", "s2tw", "t2s", "auto")
+        /** 简繁转换档位：顺序固定为 正常 / 标准 / 台湾 / 香港 / 繁转简 / 跟随。 */
+        val CONVERSION_VALUES = arrayOf("off", "s2t", "s2tw", "s2hk", "t2s", "auto")
         val CONVERSION_LABELS = arrayOf(
-            "不转换 · 原样输出",
-            "简体 → 繁体（标准） · 语音→語音",
-            "简体 → 繁体（台湾正体） · 里→裡",
-            "繁体 → 简体 · 語音→语音",
-            "跟随输入法简/繁开关",
-        )
-        val CONVERSION_SHORT = arrayOf(
-            "不转换（原样输出）",
+            "正常输出",
             "简体 → 繁体（标准）",
-            "简体 → 繁体（台湾正体）",
+            "简体 → 繁体（台湾）",
+            "简体 → 繁体（香港）",
             "繁体 → 简体",
             "跟随输入法简/繁开关",
         )
+        val CONVERSION_SHORT = CONVERSION_LABELS
         val KEEP_ALIVE_VALUES = arrayOf("-1", "0", "5", "15", "30")
         val KEEP_ALIVE_LABELS = arrayOf(
             "常驻内存（最快）",

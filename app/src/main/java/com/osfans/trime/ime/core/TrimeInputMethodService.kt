@@ -608,11 +608,20 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
 
     /**
      * 当前 Rime 是否处于繁体输出状态，供本地语音「跟随输入法简/繁」档位读取。
-     * Rime 尚未启动或状态读取失败时按简体处理，避免语音上屏被异常打断。
+     *
+     * 注意：librime 的 `RimeStatus.is_traditional` 读的是名为 `traditional` 的 option，
+     * 但同文各方案实际用的是 `simplification`（开 = 简体，关 = 繁体 / 漢字）。
+     * 只读前者在多数方案里恒为 false，会让跟随档永远输出简体；这里直接读 option，
+     * 不依赖 statusCached 的事件更新。Rime 未就绪时按简体处理。
      */
     val isTraditionalMode: Boolean
         get() = runCatching {
-            if (::rime.isInitialized) rime.run { statusCached.isTraditional } else false
+            if (!::rime.isInitialized) return@runCatching false
+            rime.run {
+                val traditional = getRuntimeOption("traditional")
+                val simplified = getRuntimeOption("simplification")
+                traditional || !simplified
+            }
         }.getOrDefault(false)
 
     fun commitText(text: String) {
