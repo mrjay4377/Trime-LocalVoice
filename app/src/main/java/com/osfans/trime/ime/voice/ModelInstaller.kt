@@ -4,7 +4,8 @@
  * 以免把刚精简掉的 APK 体积又加回来。压缩包解压、逐文件 SHA-256 校验、原子发布与
  * 自动设为当前引擎的逻辑参考 trime-mie / BiBi-Keyboard（Apache-2.0）。
  *
- * 安装目标固定为「用户目录 / voice/<家族>/<变体>」，即应用私有外部目录，不需要存储权限。
+ * 安装目标为「使用者资料夹 / voice/<家族>/<变体>」（默认）；资料夹无法按真实路径读写时
+ * 自动回退到应用私有外部目录，旧位置的模型仍会被扫描到。
  */
 package com.osfans.trime.ime.voice
 
@@ -99,39 +100,46 @@ object ModelInstaller {
      * 只有目录内含受支持家族的模型文件才算一套模型，避免把普通文件夹列进来。
      */
     fun installedModels(context: Context): List<InstalledModel> {
-        val root = VoiceModels.primaryRoot(context)
-        if (!root.isDirectory) return emptyList()
         val result = mutableListOf<InstalledModel>()
+        val primary = VoiceModels.primaryRoot(context).absolutePath
 
-        val flatFiles = root.listFiles()?.filter(::isModelFile).orEmpty()
-        if (flatFiles.isNotEmpty()) {
-            result += InstalledModel(
-                dir = root,
-                label = "根目录（手动平铺）",
-                sizeBytes = flatFiles.sumOf { it.length() },
-                flatRoot = true,
-            )
-        }
+        // v42 起主目录跟随「使用者资料夹」，旧版模型可能还留在应用私有目录；
+        // 两个位置都要列出来，否则换目录后旧模型会在「删除模型」里凭空消失。
+        fun scanRoot(root: File) {
+            if (!root.isDirectory) return
+            val legacy = root.absolutePath != primary
+            val flatFiles = root.listFiles()?.filter(::isModelFile).orEmpty()
+            if (flatFiles.isNotEmpty()) {
+                result += InstalledModel(
+                    dir = root,
+                    label = if (legacy) "根目录（手动平铺 · 旧位置）" else "根目录（手动平铺）",
+                    sizeBytes = flatFiles.sumOf { it.length() },
+                    flatRoot = true,
+                )
+            }
 
-        fun scan(parent: File, depth: Int) {
-            if (depth > 2) return
-            parent.listFiles()?.forEach { dir ->
-                if (!dir.isDirectory || dir.name == "__MACOSX") return@forEach
-                val hasModel = dir.listFiles()?.any(::isModelFile) == true
-                if (hasModel) {
-                    val label = when {
-                        dir.name.startsWith(".") -> "${dir.name}（安装残留）"
-                        depth == 0 -> dir.name
-                        else -> "${parent.name}/${dir.name}"
+            fun scan(parent: File, depth: Int) {
+                if (depth > 2) return
+                parent.listFiles()?.forEach { dir ->
+                    if (!dir.isDirectory || dir.name == "__MACOSX") return@forEach
+                    val hasModel = dir.listFiles()?.any(::isModelFile) == true
+                    if (hasModel) {
+                        val label = when {
+                            dir.name.startsWith(".") -> "${dir.name}（安装残留）"
+                            depth == 0 -> dir.name
+                            else -> "${parent.name}/${dir.name}"
+                        }
+                        result += InstalledModel(dir, label, dirSize(dir), flatRoot = false)
+                        // 已作为一整套列出，不再把内部子目录重复列一遍
+                    } else {
+                        scan(dir, depth + 1)
                     }
-                    result += InstalledModel(dir, label, dirSize(dir), flatRoot = false)
-                    // 已作为一整套列出，不再把内部子目录重复列一遍
-                } else {
-                    scan(dir, depth + 1)
                 }
             }
+            scan(root, 0)
         }
-        scan(root, 0)
+
+        VoiceModels.roots(context).forEach(::scanRoot)
         return result.distinctBy { it.dir.absolutePath }.sortedBy { it.label }
     }
 
@@ -234,7 +242,7 @@ object ModelInstaller {
 
     /**
      * 在 voice 根目录写一份清单，让用户打开 voice 文件夹就能看到模型装在哪一层子目录。
-     * 应用私有外部目录（Android/data/...）在部分文件管理器里不可见，这份清单也用来说明原因。
+     * 回退位置应用私有外部目录（Android/data/...）在部分文件管理器里不可见，清单也用来说明原因。
      */
     fun writeInstalledIndex(context: Context) {
         runCatching {
@@ -268,7 +276,9 @@ object ModelInstaller {
                 }
                 if (!imported) appendLine("（暂无本地导入的模型）")
                 appendLine()
-                appendLine("模型保存在应用私有外部目录 Android/data/<包名>/files/rime/voice 下，")
+                appendLine("模型目录：${root.absolutePath}")
+                appendLine("默认跟随「使用者资料夹」；若这里显示 Android/data/<包名>/files/rime/voice，")
+                appendLine("表示资料夹无法按真实路径读写、已自动回退到应用私有目录（旧位置仍会扫描）。")
                 appendLine("部分文件管理器无法直接浏览 Android/data，可用 adb 或在设置页复制路径查看。")
             }
             File(root, "installed.txt").writeText(text, Charsets.UTF_8)

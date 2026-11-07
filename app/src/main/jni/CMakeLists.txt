@@ -6,6 +6,21 @@ cmake_minimum_required(VERSION 3.18.0)
 
 project(trime VERSION 3.0.0)
 
+# AGP 对 debug 变体传 -DCMAKE_BUILD_TYPE=Debug，编译命令里只有 -g、没有任何 -O，
+# 整个 librime 以 -O0 运行：部署时的 prism 编译、输入时的音节图 / 整句组词都会慢数倍，
+# 与官方 release 包对比尤其明显。NDK r30 的 toolchain 还会把各 *_FLAGS_RELEASE 置空，
+# 且 AGP 的 release 变体实际用的是 RelWithDebInfo（默认 -O2 -g），所以这里对所有
+# 非 Debug 类型统一强制 -O3 -DNDEBUG，保证本地离线编译的 release 包与官方发行版一致。
+# 只影响非 Debug 变体，Debug 行为不变。
+if(ANDROID AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG" CACHE STRING "Release C flags" FORCE)
+  set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG" CACHE STRING "Release CXX flags" FORCE)
+  set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O3 -DNDEBUG" CACHE STRING "RelWithDebInfo C flags" FORCE)
+  set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -DNDEBUG" CACHE STRING "RelWithDebInfo CXX flags" FORCE)
+  set(CMAKE_C_FLAGS_MINSIZEREL "-O3 -DNDEBUG" CACHE STRING "MinSizeRel C flags" FORCE)
+  set(CMAKE_CXX_FLAGS_MINSIZEREL "-O3 -DNDEBUG" CACHE STRING "MinSizeRel CXX flags" FORCE)
+endif()
+
 # for reproducible build
 add_link_options("LINKER:--hash-style=both,--build-id=none")
 

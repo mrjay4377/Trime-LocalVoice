@@ -143,8 +143,11 @@ object VoiceModels {
     @Suppress("DEPRECATION")
     private fun candidateRoots(context: Context): List<File> {
         val roots = mutableListOf<File>()
-        // Rime 用户目录固定在应用私有外部目录；用户改「使用者资料夹」只影响 Rime 配置的
-        // 同步来源，不会改变 voice 的位置（SAF 目录也无法作为 sherpa-onnx 的模型文件路径）。
+        // 首选：使用者资料夹 / voice。默认资料夹模式就是 EXTERNAL_SYNC，用户自己选的 rime
+        // 目录多半是 SAF（content://），而 sherpa-onnx 是 native 库、只能按真实路径打开模型，
+        // 所以先把它还原成文件路径并确认可写；不可用则静默回退到应用私有目录。
+        externalVoiceRoot()?.let { roots += it }
+        // 以下为回退与旧版兼容：v42 之前模型固定在应用私有目录，仍要能扫描到旧模型。
         runCatching { roots += File(DataManager.userDataDir, DIR_NAME) }
         runCatching { roots += File(UserDataManager.userDataDir, DIR_NAME) }
         context.getExternalFilesDir(null)?.let { roots += File(it, DIR_NAME) }
@@ -152,6 +155,47 @@ object VoiceModels {
         roots += File(context.filesDir, DIR_NAME)
         return roots.distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
     }
+
+    /** 探测目录能否真正写入并读回文件（native 引擎要按路径打开模型）。 */
+    private fun probeWritable(dir: File): Boolean =
+        runCatching {
+            if (!dir.isDirectory && !dir.mkdirs()) {
+                false
+            } else {
+                val probe = File(dir, ".voice_write_probe")
+                probe.writeText("ok", Charsets.UTF_8)
+                val ok = probe.isFile && probe.canRead() && probe.length() > 0 && dir.canWrite()
+                probe.delete()
+                ok
+            }
+        }.getOrDefault(false)
+
+    @Volatile private var writableRootPath: String? = null
+
+    @Volatile private var writableRootOk = false
+
+    /** 使用者资料夹 / voice；资料夹不可用、无法解析或不可写时返回 null。 */
+    private fun externalVoiceRoot(): File? {
+        val base = runCatching { UserDataManager.externalRimeDirAsFile() }.getOrNull() ?: return null
+        val voice = File(base, DIR_NAME)
+        val path = voice.absolutePath
+        val ok =
+            if (writableRootPath == path) {
+                writableRootOk
+            } else {
+                val probed = probeWritable(voice)
+                writableRootPath = path
+                writableRootOk = probed
+                probed
+            }
+        return if (ok) voice else null
+    }
+
+    /** 当前 voice 是否真的落在「使用者资料夹」下；false 表示已回退到应用私有目录。 */
+    fun isUsingUserDataFolder(): Boolean = externalVoiceRoot() != null
+
+    /** 所有可扫描的 voice 目录（含旧版私有目录），供模型列表与删除使用。 */
+    fun roots(context: Context): List<File> = candidateRoots(context)
 
     fun primaryRoot(context: Context): File = candidateRoots(context).first()
 
@@ -190,8 +234,10 @@ object VoiceModels {
         appendLine("流式 Transducer 模型（含 encoder/decoder/joiner/tokens）放到 voice/streaming_xasr/ 下；")
         appendLine("流式 Paraformer 模型（含 encoder/decoder/tokens）放到 voice/streaming_paraformer/ 下。")
         appendLine()
-        appendLine("注意：本 voice 目录固定在应用私有目录，不随「使用者资料夹 / 数据位置」改变，")
-        appendLine("也不参与资料夹同步（模型体积大，避免部署时被反复哈希、复制或误删）。")
+        appendLine("注意：本 voice 目录默认跟随「使用者资料夹 / 数据位置」，即你所选 rime 目录下的 voice/，")
+        appendLine("备份或迁移方案时模型可以一起带走。若该目录无法被还原成可读写的真实路径，")
+        appendLine("会自动回退到应用私有目录 Android/data/<包名>/files/rime/voice（旧版位置仍可扫描到模型）。")
+        appendLine("两种位置都不参与资料夹与 WebDAV 同步（模型体积大，避免部署时被反复哈希、复制或误删）。")
         appendLine()
         appendLine("模型来源：https://github.com/k2-fsa/sherpa-onnx/releases （或 BiBi-Keyboard models release）")
         appendLine("录音格式：16kHz / 单声道 / 16bit PCM；本应用只在设备本地推理，不上传音频。")

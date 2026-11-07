@@ -281,7 +281,7 @@
     <string name="local_asr_download_confirm">%1$s\n下载约 %2$d MiB，将自动解压、校验并安装到 voice 目录。建议在 Wi-Fi 下进行。</string>
     <string name="local_asr_install_title">正在安装模型</string>
     <string name="local_asr_install_done">模型安装完成</string>
-    <string name="local_asr_install_done_msg">%1$s 已安装并设为当前语音模型。\n\n安装位置：\n%2$s\n\n这是应用私有外部目录（Android/data/…/files/rime/voice），部分文件管理器看得到、部分看不到；可点「复制路径」用 adb 或文件管理器查看。回到输入框长按空格即可说话，首次识别需要加载模型。</string>
+    <string name="local_asr_install_done_msg">%1$s 已安装并设为当前语音模型。\n\n安装位置：\n%2$s\n\n默认跟随「使用者资料夹」；若显示 Android/data/…/files/rime/voice，表示资料夹无法按真实路径读写、已回退到应用私有目录。可点「复制路径」用 adb 或文件管理器查看。回到输入框长按空格即可说话，首次识别需要加载模型。</string>
     <string name="local_asr_install_failed">模型安装未完成</string>
     <string name="local_asr_install_failed_msg">原因：%1$s\n\n预期安装目录：\n%2$s\n\n若提示校验/缺文件，可切换下载源重试，或手动把模型包解压到该 voice 目录。voice 根目录里的 installed.txt 会列出已安装模型。</string>
     <string name="local_asr_copy_path">复制路径</string>

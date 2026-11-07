@@ -49,6 +49,9 @@ android {
 
     buildTypes {
         release {
+            // 与 debug 保持一致：本地 AAPT2 对部分第三方 AAR 的 PNG/9-patch 资源编译失败，
+            // 关闭 PNG crunching 绕过。否则离线编译 release 会在资源合并阶段直接报错。
+            isCrunchPngs = false
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

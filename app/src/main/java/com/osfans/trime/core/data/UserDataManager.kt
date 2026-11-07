@@ -8,6 +8,8 @@ package com.osfans.trime.core.data
 import android.annotation.SuppressLint
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.provider.DocumentsContract
 import android.util.Base64
 import androidx.core.util.AtomicFile
 import com.osfans.trime.TrimeApplication
@@ -130,6 +132,36 @@ object UserDataManager {
     fun isStorageChoiceDone(): Boolean = when (dataStorageMode) {
         DataStorageMode.APP_STORAGE -> true
         DataStorageMode.EXTERNAL_SYNC -> externalRimeTreeUri.isNotEmpty()
+    }
+
+    /**
+     * 把「使用者资料夹」的 SAF tree URI 解析成真实文件系统路径。
+     *
+     * 本地语音引擎（sherpa-onnx）是 native 库，只能用真实文件路径打开 onnx 模型，
+     * 无法直接读 content:// ；而使用者资料夹默认就是 SAF 目录。这里把常见的
+     * `primary:Documents/rime` 这类 tree document id 还原成 /storage/emulated/0/... ，
+     * 供 voice 目录跟随资料夹使用。解析不出来（外置 SD 卡、厂商自定义 provider、
+     * 未选择目录）时返回 null，调用方应回退到应用私有目录。
+     */
+    @Suppress("DEPRECATION")
+    fun externalRimeDirAsFile(): File? {
+        if (!useExternalSync()) return null
+        val raw = externalRimeTreeUri
+        if (raw.isEmpty()) return null
+        val uri = runCatching { Uri.parse(raw) }.getOrNull() ?: return null
+        val docId = runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrNull() ?: return null
+        val sep = docId.indexOf(':')
+        if (sep <= 0) return null
+        val volume = docId.substring(0, sep)
+        val relative = docId.substring(sep + 1).trimStart('/')
+        val base =
+            when {
+                volume.equals("primary", ignoreCase = true) -> Environment.getExternalStorageDirectory()
+                // 外置 SD 卡的 volume 一般形如 1234-ABCD
+                else -> File("/storage", volume)
+            }
+        val dir = if (relative.isEmpty()) base else File(base, relative)
+        return dir.takeIf { it.isDirectory && it.canRead() }
     }
 
     /**

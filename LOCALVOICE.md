@@ -95,14 +95,11 @@ git config --local http.version HTTP/1.1
 
 ## 不要提交的本地改动
 
-本机（Windows）工作区里还有一批**构建环境适配改动，刻意没有纳入提交**：
+本机（Windows）工作区里仍有一批**构建环境适配状态，刻意没有纳入提交**：
 
-- `app/data/rime/*`、`app/src/main/assets/shared/*`：clone 时 `core.symlinks=false` 导致 symlink 被实体化成普通文件（约 60 万行）
-- `app/src/main/jni/librime-lua-deps`：submodule 内部 dirty
-- `.gradle-home/`、`compile_log.txt`、`run_compile.sh`、`app/src/main/jni/boost-*.tar.xz`
-
-它们只影响本机编译，提交会污染 fork 并在合并上游时造成大面积冲突。Windows 上建议开启开发者模式后
-`git config core.symlinks true` 并重新 checkout，让 symlink 恢复正常。
+- `app/data/rime/*` 与 `app/src/main/jni/librime-lua-deps`：submodule 被本地编译脚本标成 dirty；提交这些指针会让仓库指向上游不存在的 commit。
+- `app/src/main/assets/shared/*.yaml` 原本是 symlink，Windows `core.symlinks=false` 下被展开成普通文件。为保证异地 clone 可编译，v33–v41 那次备份已把它们以 `100644` 普通文件提交；以后合并 upstream 时这些路径会与上游 symlink 冲突，需手工处理。
+- `.gradle-home/`、`compile_log.txt`、`run_compile.sh`、`app/src/main/jni/boost-*.tar.xz` 等本地构建缓存已写入 `.gitignore`，并于 2026-11-07 清理，不再产生未跟踪文件。
 
 ## 二进制依赖（v29 起随仓库提供，异地 clone 可直接编译）
 
@@ -395,4 +392,37 @@ release 里还有一个 `sherpa-onnx-qnn-x-asr-streaming-zipformer-transducer-..
 
 体积 22,054,168 B（与 v40 相同，ZIP 对齐巧合；`classes.dex` 9,269,172 → 9,269,668 B），
 sha 前缀 `dbbc76d7`，证书 `629c7023…` 一致可覆盖 v40；`apksigner` v1/v2/v3 通过。
-GitHub 备份继续暂停，改动仍留在工作树未提交。
+截至 v41 的全部改动已于 2026-11-07 提交 `7f0f5c0b` 并推送 `origin/localvoice`。
+
+## v42：voice 目录跟随「使用者资料夹」
+
+| 项目 | 改动 |
+| --- | --- |
+| 默认位置 | `VoiceModels.candidateRoots()` 首选「使用者资料夹 / voice」，不再固定在应用私有 `Android/data/<包名>/files/rime/voice` |
+| SAF 解析 | 新增 `UserDataManager.externalRimeDirAsFile()`：把 `externalRimeTreeUri` 的 tree document id（如 `primary:Documents/rime`）还原为 `/storage/emulated/0/Documents/rime`；外置 SD 卡走 `/storage/<volume>/`；解析失败返回 null |
+| 可写探测 | `probeWritable()` 在 voice 里写临时探针并读回，确认 native 引擎能按真实路径打开模型；结果按路径缓存，避免每次状态检查都做磁盘 IO |
+| 回退与兼容 | 未选资料夹 / APP_STORAGE / 目录不可读写时自动回退到应用私有目录；`candidateRoots()` 保留全部历史位置，`status()` 与 `installedModels()` 都扫描所有位置，旧模型不会消失（列表里标「旧位置」） |
+| 文案 | `README.txt`、`installed.txt`、安装完成弹窗、设置页「模型状态」详情同步更新，并显示当前是跟随资料夹还是已回退 |
+| 同步 | voice 仍不参与使用者资料夹镜像与 WebDAV 同步（既有过滤规则不变） |
+
+体积 22,054,168 B，sha 前缀 `171b9d3b`，`classes.dex` 9,269,668 → 9,273,220 B，
+证书 `629c7023…` 一致可覆盖 v41；`apksigner` v1/v2/v3 通过。
+v42 改动仍留在工作树未提交（最新提交仍是 `7f0f5c0b`）。
+
+## v43：release 优化构建（修复「部署慢 / 笔画卡」）
+
+| 项目 | 改动 |
+| --- | --- |
+| 根因 | 此前 v18–v42 全部是 **debug 包**：merge manifest 带 `android:debuggable="true"`，且 native 层编译命令只有 `-g`、无任何 `-O`，整库 librime 以 `-O0` 运行。官方原版同文是 release 包（`-O3 -DNDEBUG` + 不可调试 + AOT），所以同一套方案在官方不卡、在我们分支卡 |
+| 优化等级 | `app/src/main/jni/CMakeLists.txt` 对所有**非 Debug** 变体（Release / RelWithDebInfo / MinSizeRel）强制 `-O3 -DNDEBUG`。NDK r30 的 toolchain 会把 `CMAKE_*_FLAGS_RELEASE` 置空，且 AGP 的 release 变体实际走 `RelWithDebInfo`，故三种类型全部兜底 |
+| PNG | `app/build.gradle.kts` release 块加 `isCrunchPngs = false`，绕过本地 AAPT2 对第三方 AAR（含 sherpa-onnx）PNG/9-patch 资源编译失败 |
+| ABI | `BUILD_ABI=arm64-v8a` 只编一个 ABI |
+
+**核验**：relwithdebinfo 的 `build.ninja` 中 **343 条编译命令全部含 `-O3`，0 条 `-O2/-O0`**；merge manifest 无 `debuggable`（release 默认 false）。
+交付 `Trime-LocalVoice-v43-arm64-v8a.apk` = `release-unsigned` 经 `repack_apk.py` 重压 + zipalign + 同一 debug key 重签。
+体积 18,987,362 B（release + R8 比 debug 小 ~3.2 MB），`librime_jni.so` 5.8 MB（`-O3` 无调试符号），
+证书 `629c7023…` 一致可覆盖 v42；`apksigner` v1/v2/v3 通过。
+
+> 注：`app/src/main/jni/boost` 目录由 `cmake/Boost.cmake` 从 `boost-1.92.0.tar.xz` 解压得来（68084 条目）；
+> Git Bash 的 `tar` 缺 `xz`、且 Windows MAX_PATH 会截断超长测试路径，已用 Python（`\\?\` 前缀）手动解压到 `jni/boost/`。
+> 该目录未入库、非构建必需缓存，合并上游或清理时勿误删。v43 改动同样未提交（最新提交仍 `7f0f5c0b`）。

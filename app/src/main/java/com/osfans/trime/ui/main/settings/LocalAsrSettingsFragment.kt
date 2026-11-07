@@ -1421,7 +1421,13 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         val root = status?.root?.absolutePath ?: VoiceModels.primaryRoot(ctx).absolutePath
         val message = buildString {
             append(getString(R.string.local_asr_model_root, displayPath(ctx, root)))
-            append("\nvoice 固定在本应用私有目录，不随「使用者资料夹」变化\n")
+            append(
+                if (VoiceModels.isUsingUserDataFolder()) {
+                    "\nvoice 跟随「使用者资料夹」，备份方案时可一并带走\n"
+                } else {
+                    "\n使用者资料夹无法按真实路径读写，voice 已回退到应用私有目录\n"
+                },
+            )
             val selected = LocalVoiceSettings.selectedVariant(ctx, familyId)
             if (selected.isNotBlank()) append("当前模型：$familyId/$selected\n")
             if (status?.ready == true) {
