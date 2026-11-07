@@ -650,6 +650,32 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
      */
     private val voiceCommitHandler = Handler(Looper.getMainLooper())
 
+    /** 流式中间结果是否正以 composing 形式留在目标输入框里。 */
+    private var voiceComposingActive = false
+
+    /**
+     * 流式语音边说边出字：把中间结果直接写进目标输入框的 composing 区。
+     * 不复用 Rime 的 composingText 字段，避免和拼音 preedit 互相覆盖；
+     * 松手后的最终结果经 commitVoiceText() → commitText() 自动替换掉这段 composing。
+     */
+    fun updateVoiceComposing(text: String) {
+        val ic = currentInputConnection ?: return
+        runCatching {
+            ic.beginBatchEdit()
+            ic.setComposingText(text, 1)
+            ic.endBatchEdit()
+            voiceComposingActive = text.isNotEmpty()
+        }.onFailure { Timber.w(it, "voice composing update failed") }
+    }
+
+    /** 取消 / 识别失败时撤销尚未确认的中间文字，不在文本框里留半句话。 */
+    fun cancelVoiceComposing() {
+        if (!voiceComposingActive) return
+        voiceComposingActive = false
+        runCatching { currentInputConnection?.setComposingText("", 1) }
+            .onFailure { Timber.w(it, "voice composing cancel failed") }
+    }
+
     fun commitVoiceText(
         text: String,
         onFailed: ((String) -> Unit)? = null,
@@ -688,6 +714,8 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         }
         lastCommittedText = text
         composingText = ""
+        // 最终结果已经替换掉流式中间文字，会话收尾时不要再撤销它。
+        voiceComposingActive = false
         InputFeedbackManager.textCommitSpeak(text)
     }
 

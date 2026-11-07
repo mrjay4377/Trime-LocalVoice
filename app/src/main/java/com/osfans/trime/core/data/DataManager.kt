@@ -7,12 +7,14 @@ package com.osfans.trime.core.data
 
 import android.content.res.AssetManager
 import android.os.Build
+import androidx.core.util.AtomicFile
 import com.osfans.trime.TrimeApplication
 import com.osfans.trime.util.FileUtils
 import com.osfans.trime.util.appContext
 import kotlinx.serialization.json.Json
 import timber.log.Timber
 import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -81,7 +83,7 @@ object DataManager {
             when (it) {
                 is DataDiff.CreateFile,
                 is DataDiff.UpdateFile,
-                -> appContext.assets.copyFile(it.path)
+                -> appContext.assets.copyFile(it.path, newChecksums.files[it.path])
 
                 is DataDiff.DeleteDir,
                 is DataDiff.DeleteFile,
@@ -89,21 +91,53 @@ object DataManager {
             }
         }
 
-        destChecksumsFile.bufferedWriter().use {
-            it.write(serializeDataChecksums(newChecksums))
+        // 原子写：首次部署中途被系统杀掉时不会留下半个 checksums.json。
+        // 若该文件损坏，下次启动会把全部 11MB 数据当成新建文件重新写一遍，
+        // 顺带把词典源文件的 mtime 全部刷新，librime 又要重跑一遍工作区更新。
+        val atomic = AtomicFile(destChecksumsFile)
+        val out = atomic.startWrite()
+        try {
+            out.write(serializeDataChecksums(newChecksums).toByteArray())
+            out.flush()
+            atomic.finishWrite(out)
+        } catch (e: Exception) {
+            atomic.failWrite(out)
+            throw e
         }
 
         Timber.d("Synced!")
     }
 
-    private fun AssetManager.copyFile(filename: String) {
+    private fun AssetManager.copyFile(filename: String, expectedSha256: String?) {
+        val target = File(externalFilesDir, filename)
+        // 覆盖安装或 checksums.json 丢失时，diff 会把所有 assets 判成 CreateFile。
+        // 内容已经一致就跳过写入，保留原 mtime：librime 的 DetectModifications
+        // 按 .yaml 的 mtime 判断工作区是否需要重建，全量重写会让首次部署
+        // 白白重跑一遍所有方案，界面长时间停在「正在部署」。
+        if (expectedSha256 != null && target.isFile && sha256Hex(target) == expectedSha256) {
+            Timber.d("Skip unchanged asset: $filename")
+            return
+        }
         open(filename).use { i ->
-            File(externalFilesDir, filename)
+            target
                 .also { it.parentFile?.mkdirs() }
                 .outputStream()
                 .use { o -> i.copyTo(o) }
         }
     }
+
+    private fun sha256Hex(file: File): String? = runCatching {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(64 * 1024)
+        file.inputStream().buffered().use { input ->
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }.getOrNull()
 
     private fun removePath(path: String) = FileUtils.delete(externalFilesDir.resolve(path))
 }

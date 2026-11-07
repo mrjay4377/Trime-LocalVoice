@@ -44,6 +44,9 @@
     <string name="reset_success">回廠成功</string>
     <string name="reset_failure">回廠失敗</string>
     <string name="deploy_progress">正在部署…</string>
+    <string name="deploy_stage_sync">正在同步使用者資料夾…</string>
+    <string name="deploy_stage_first_build">首次部署：正在編譯詞庫，可能需要幾分鐘…</string>
+    <string name="deploy_stage_update">正在部署：重新編譯有變更的方案…</string>
     <string name="other_ime">其他輸入法</string>
     <string name="ui_mode">使用者界面模式</string>
     <string name="advanced">高級</string>

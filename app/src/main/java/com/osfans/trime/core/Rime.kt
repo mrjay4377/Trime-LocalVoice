@@ -6,11 +6,14 @@
 package com.osfans.trime.core
 
 import com.osfans.trime.BuildConfig
+import com.osfans.trime.R
 import com.osfans.trime.core.data.DataManager
 import com.osfans.trime.core.data.UserDataManager
 import com.osfans.trime.data.opencc.OpenCCDictManager
 import com.osfans.trime.data.prefs.AppPrefs
 import com.osfans.trime.ime.core.InlinePreeditMode
+import com.osfans.trime.util.DeployNotification
+import com.osfans.trime.util.appContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -96,8 +99,22 @@ class Rime :
         getCurrentRimeSchema() == ".default" // 無方案
     }
 
+    /** build/ 里已有编译好的词典时，部署只是增量重建；首次为空才需要全量编译。 */
+    private fun hasCompiledDictionaries(): Boolean =
+        DataManager.stagingDir.listFiles()?.any { it.isFile && it.name.endsWith(".bin") } == true
+
     override suspend fun deploy() = lock.withLock {
+        DeployNotification.showStage(appContext.getString(R.string.deploy_stage_sync))
         UserDataManager.sync()
+        DeployNotification.showStage(
+            appContext.getString(
+                if (hasCompiledDictionaries()) {
+                    R.string.deploy_stage_update
+                } else {
+                    R.string.deploy_stage_first_build
+                },
+            ),
+        )
         val deployFinished = CompletableDeferred<Boolean>()
         val deployHandler: (RimeMessage<*>) -> Unit = { message ->
             if (message is RimeMessage.DeployMessage) {
@@ -122,13 +139,16 @@ class Rime :
             }
             val success =
                 withContext(Dispatchers.IO) {
-                    withTimeout(5.minutes) {
+                    // 首次部署要编译 luna_pinyin / stroke 等词典，低端机上可能超过 5 分钟；
+                    // 超时会误报部署失败，放宽到 10 分钟。
+                    withTimeout(10.minutes) {
                         deployFinished.await()
                     }
                 }
             check(success) { "Rime deploy failed" }
         } finally {
             unregisterRimeMessageHandler(deployHandler)
+            DeployNotification.clearStage()
         }
     }
 

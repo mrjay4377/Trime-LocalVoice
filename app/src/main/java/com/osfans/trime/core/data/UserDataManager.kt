@@ -44,6 +44,9 @@ object UserDataManager {
     /** 本地语音模型目录，只放在应用私有目录，不参与使用者资料夹的双向镜像。 */
     private const val VOICE_DIR_NAME = "voice"
 
+    /** librime 编译产物目录（词典 .table.bin / .prism.bin），属本机缓存，不镜像。 */
+    private const val BUILD_DIR_NAME = "build"
+
     private const val SCHEMA_LIST_CUSTOM_PATCH = """
       patch:
         schema_list:
@@ -175,17 +178,19 @@ object UserDataManager {
 
             val remoteMap = buildMap {
                 StorageAccess.walk(externalRimeDir)
-                    .collect { if (!isVoicePath(it.relativePath)) put(it.relativePath, it.file) }
+                    .collect { if (!isMirrorIgnoredPath(it.relativePath)) put(it.relativePath, it.file) }
             }
             val localMap = walkLocal(userDataDir)
 
-            // voice 里是几百 MB 甚至上 GB 的离线模型，固定只放在应用私有目录：
-            // 若纳入使用者资料夹的双向镜像，每次部署都要对整套模型做 SHA-256 并在
-            // 两侧复制，界面会长时间停在部署中；外部资料夹没有 voice 时还会被判成
-            // 「本地删除」，反过来把已安装的模型删掉。
-            val trackedPaths = oldManifest.files.keys.filterNot { isVoicePath(it) }.toSet()
+            // voice/ 是几百 MB 甚至上 GB 的离线模型，build/ 是首次部署编译出来的
+            // 几十 MB 词典缓存，两者都只放在应用私有目录：纳入使用者资料夹的双向
+            // 镜像后，每次部署都要对它们逐个做 SHA-256 并在两侧复制，界面会长时间
+            // 停在部署中；外部资料夹没有 voice 时还会被判成「本地删除」，反过来把
+            // 已安装的模型删掉。build/ 里的二进制还与 librime 版本绑定，跨版本同步
+            // 反而会让旧产物污染新版本的工作区。
+            val trackedPaths = oldManifest.files.keys.filterNot(::isMirrorIgnoredPath).toSet()
             val allPaths = (localMap.keys + remoteMap.keys + trackedPaths)
-                .filterNot { isVoicePath(it) }
+                .filterNot(::isMirrorIgnoredPath)
                 .sortedBy { it.count { c -> c == '/' } }
 
             // Fast path: when every path still matches the recorded state on both sides and no
@@ -437,13 +442,14 @@ object UserDataManager {
         if (!root.exists()) return emptyMap()
         return root
             .walkTopDown()
-            .onEnter { dir -> dir == root || dir.name != VOICE_DIR_NAME }
+            .onEnter { dir -> dir == root || (dir.name != VOICE_DIR_NAME && dir.name != BUILD_DIR_NAME) }
             .filter { it != root }
             .associateBy { it.toRelativeString(root) }
     }
 
-    private fun isVoicePath(path: String): Boolean =
-        path == VOICE_DIR_NAME || path.startsWith("$VOICE_DIR_NAME/")
+    private fun isMirrorIgnoredPath(path: String): Boolean =
+        path == VOICE_DIR_NAME || path.startsWith("$VOICE_DIR_NAME/") ||
+            path == BUILD_DIR_NAME || path.startsWith("$BUILD_DIR_NAME/")
 
     private fun isUnchanged(
         path: String,

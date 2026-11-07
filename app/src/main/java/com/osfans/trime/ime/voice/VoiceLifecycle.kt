@@ -50,17 +50,14 @@ object VoiceLifecycle {
     private suspend fun preloadInternal(ctx: Context) {
         runCatching {
             val family = LocalVoiceSettings.vendor(ctx)
-            val model = VoiceModels.status(ctx, family).resolved ?: return
-            if (VoiceModels.isStreaming(family)) {
-                val (config, key) = StreamingSherpaEngine.buildConfig(ctx, model)
-                if (SherpaOnlineManager.isLoaded(key)) return
-                SherpaOnlineManager.preload(config, key)
-            } else {
-                val manager = SherpaOfflineManager.getInstance()
-                val (config, key) = OfflineSherpaEngine.buildConfig(ctx, family, model)
-                if (manager.isLoaded(key)) return
-                manager.preload(config, key)
-            }
+            // 流式引擎不在键盘弹出时单独预加载：统一为「按住语音键时按需加载」，
+            // 加载期间 PCM 排队，模型就绪后回放再逐块出字，开头语音不会丢。
+            if (VoiceModels.isStreaming(family)) return@runCatching
+            val model = VoiceModels.status(ctx, family).resolved ?: return@runCatching
+            val manager = SherpaOfflineManager.getInstance()
+            val (config, key) = OfflineSherpaEngine.buildConfig(ctx, family, model)
+            if (manager.isLoaded(key)) return@runCatching
+            manager.preload(config, key)
         }.onFailure { Timber.w(it, "voice model preload failed") }
     }
 

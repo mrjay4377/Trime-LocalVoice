@@ -21,7 +21,10 @@ object OpenCCDictManager {
     }
 
     private val sharedDir = File(DataManager.sharedDataDir, "opencc").also { it.mkdirs() }
-    private val userDir = File(UserDataManager.userDataDir, "opencc").also { it.mkdirs() }
+    // 不要在 APP 一启动就在使用者资料夹里凭空建一个空的 opencc/ 目录：
+    // 这个目录只有在用户导入自定义 OpenCC 词典时才会用到，
+    // 无条件 mkdirs 会让 WebDAV / 资料夹同步的用户莫名多出一个文件夹。
+    private val userDir = File(UserDataManager.userDataDir, "opencc")
 
     fun sharedDictionaries(): List<Dictionary> = sharedDir
         .listFiles()
@@ -37,6 +40,7 @@ object OpenCCDictManager {
         val raw =
             Dictionary.new(file)
                 ?: throw IllegalArgumentException("${file.path} is not a opencc/text dictionary")
+        userDir.mkdirs()
         // convert to opencc format in dictionaries dir
         // preserve original file name
         val new =

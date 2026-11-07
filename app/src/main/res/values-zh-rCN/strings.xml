@@ -41,6 +41,9 @@
     <string name="reset_success">重置成功</string>
     <string name="reset_failure">重置失败</string>
     <string name="deploy_progress">正在部署…</string>
+    <string name="deploy_stage_sync">正在同步使用者资料夹…</string>
+    <string name="deploy_stage_first_build">首次部署：正在编译词库，可能需要几分钟…</string>
+    <string name="deploy_stage_update">正在部署：重新编译有变更的方案…</string>
     <string name="other_ime">其他输入法</string>
     <string name="ui_mode">用户界面模式</string>
     <string name="advanced">高级</string>

@@ -21,9 +21,11 @@ import okio.BufferedSink
 import org.xmlpull.v1.XmlPullParser
 import java.io.File
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.net.UnknownHostException
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -45,6 +47,17 @@ class WebDavClient(
 
     /** 已归一化、以 / 结尾的集合 URL（含 remoteDir）。 */
     private val root: String = buildRoot(baseUrl, remoteDir)
+
+    /**
+     * 最近一次 PROPFIND 里 `<d:response>` 的原始数量（含集合自身和被忽略的条目）。
+     * 与 list() 解析出的条目数对比，就能判断文件是不是在 href 解析阶段被丢掉。
+     */
+    @Volatile
+    var lastResponseCount: Int = 0
+        private set
+
+    /** 远端目录留空时，地址本身就是根目录，不应在服务器上新建任何文件夹。 */
+    private val autoCreateRoot: Boolean = remoteDir.trim().trim('/').isNotEmpty()
 
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(CONNECT_TIMEOUT_S, TimeUnit.SECONDS)
@@ -105,6 +118,24 @@ class WebDavClient(
     }
 
     /**
+     * DNS 抖动、切换 Wi-Fi / 移动数据、连接超时这类瞬时错误，OkHttp 的
+     * retryOnConnectionFailure 并不会重试（域名解析返回空地址时直接抛 UnknownHostException）。
+     * 一次抖动会让整批十几个文件全部失败，所以在这里做少量短退避重试。
+     * 只对 IOException 重试；HTTP 4xx/5xx 是正常响应，仍交给调用方按状态码处理。
+     */
+    private fun isTransientNetworkError(e: IOException): Boolean {
+        if (e is UnknownHostException || e is InterruptedIOException) return true
+        val msg = e.message.orEmpty().lowercase(Locale.US)
+        return "unable to resolve host" in msg ||
+            "no address associated" in msg ||
+            "network is unreachable" in msg ||
+            "failed to connect" in msg ||
+            "connection reset" in msg ||
+            "econnreset" in msg ||
+            "software caused connection abort" in msg
+    }
+
+    /**
      * 手动跟随 301/302/307/308（只限同主机，避免把 Basic 凭据发到第三方地址）。
      * 返回的 Response 由调用方 use{} 关闭。
      */
@@ -118,6 +149,7 @@ class WebDavClient(
     ): Response {
         var url = urlOf(relative, directory)
         var redirects = 0
+        var networkRetries = 0
         while (true) {
             val builder = Request.Builder()
                 .url(url.toString())
@@ -131,7 +163,21 @@ class WebDavClient(
                 upload != null -> fileBody(upload)
                 else -> null
             }
-            val response = client.newCall(builder.method(method, requestBody).build()).execute()
+            val response = try {
+                client.newCall(builder.method(method, requestBody).build()).execute()
+            } catch (e: IOException) {
+                if (!isTransientNetworkError(e) || networkRetries >= MAX_NETWORK_RETRIES) throw e
+                networkRetries++
+                // 每次重试都重建 Request / RequestBody：fileBody 每次 writeTo 会重新打开文件，
+                // 所以 PUT 重发是安全的。
+                try {
+                    Thread.sleep(RETRY_DELAY_MS * networkRetries)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw IOException("WebDAV 同步已中断", e)
+                }
+                continue
+            }
             val code = response.code
             val location = response.header("Location")
             if (code in REDIRECT_CODES && !location.isNullOrBlank() && redirects < MAX_REDIRECTS) {
@@ -164,8 +210,24 @@ class WebDavClient(
         return WebDavException("$action $target 失败：HTTP $code $message$hint")
     }
 
-    /** 确保配置的远端根目录存在；405/403/409 表示目录已存在或不允许重复创建，视为可用。 */
+    /** PROPFIND Depth:0 只探测目录本身，不列子项。 */
+    private fun exists(relative: String): Boolean =
+        request(
+            method = "PROPFIND",
+            relative = relative,
+            directory = true,
+            headers = mapOf("Depth" to "0"),
+            body = PROPFIND_BODY.toByteArray(Charsets.UTF_8),
+        ).use { it.code in 200..299 }
+
+    /**
+     * 只有填了「远端目录」并且该目录确实不存在时才新建文件夹。
+     * 留空表示用户指定地址就是根目录，绝不对其发 MKCOL；
+     * 已存在时也不再每次同步重复发 MKCOL（部分服务器会记日志或返回 403）。
+     * 405/403/409 仍视为目录已存在或不允许重复创建。
+     */
     fun ensureRoot() {
+        if (!autoCreateRoot || exists("")) return
         request("MKCOL", "", directory = true).use { response ->
             if (response.code !in 200..299 &&
                 response.code != 403 && response.code != 405 && response.code != 409
@@ -195,8 +257,12 @@ class WebDavClient(
     }
 
     /** PROPFIND Depth:1 列出一层子项；207 Multi-Status 属于 2xx。 */
-    fun list(relative: String): List<Entry> =
-        request(
+    fun list(relative: String): List<Entry> {
+        // 必须以「本次请求的集合」为基准解析 href：坚果云等服务器会在 Depth:1 的响应里
+        // 把集合自身也列出来，若仍拿全局 root 去减前缀，递归到 backgrounds/ 时就会把
+        // 自身误认成子项 backgrounds，拼出 backgrounds/backgrounds 并对它发 PROPFIND → 404。
+        val collection = urlOf(relative, directory = true)
+        return request(
             method = "PROPFIND",
             relative = relative,
             directory = true,
@@ -208,8 +274,17 @@ class WebDavClient(
             }
             val xml = response.body?.string()
                 ?: throw WebDavException("读取远端目录 $relative 失败：服务器返回空内容")
-            parsePropfind(xml)
+            parsePropfind(xml, collection)
         }
+    }
+
+    /** 当前实际连接的集合 URL，界面上用于核对「远端目录」有没有填错。 */
+    fun rootUrl(): String = root
+
+    /** 根目录一级项（目录带 / 后缀）；恢复时一个文件都扫不到时，用来判断备份是不是藏在子目录里。 */
+    fun topLevelNames(): List<String> = runCatching {
+        list("").map { if (it.isDirectory) "${it.name}/" else it.name }
+    }.getOrDefault(emptyList())
 
     fun upload(file: File, relative: String) {
         request("PUT", relative, upload = file).use { response ->
@@ -243,11 +318,12 @@ class WebDavClient(
         }
     }
 
-    private fun parsePropfind(xml: String): List<Entry> {
+    private fun parsePropfind(xml: String, collection: URL): List<Entry> {
         val parser = Xml.newPullParser()
         parser.setInput(xml.reader())
         val result = mutableListOf<Entry>()
         val text = StringBuilder()
+        var rawResponses = 0
         var inResponse = false
         var href: String? = null
         var isDirectory = false
@@ -275,9 +351,14 @@ class WebDavClient(
                         "getlastmodified" -> lastModified = parseTime(text.toString().trim())
                         "getcontentlength" -> size = text.toString().trim().toLongOrNull() ?: 0L
                         "response" -> {
-                            val name = href?.let(::childName).orEmpty()
+                            rawResponses++
+                            val rawHref = href?.trim()
+                            val name = rawHref?.let { childName(it, collection) }.orEmpty()
+                            // 部分服务器不给 <d:collection/>，但 href 以 / 结尾必定是集合；
+                            // 误判成文件会去 GET 一个目录，里面的文件就整批漏掉。
+                            val asDirectory = isDirectory || rawHref?.endsWith("/") == true
                             if (name.isNotEmpty()) {
-                                result += Entry(name, isDirectory, lastModified, size)
+                                result += Entry(name, asDirectory, lastModified, size)
                             }
                             inResponse = false
                         }
@@ -287,6 +368,7 @@ class WebDavClient(
             }
             parser.next()
         }
+        lastResponseCount = rawResponses
         return result
     }
 
@@ -294,30 +376,63 @@ class WebDavClient(
     private fun localName(parser: XmlPullParser): String =
         parser.name?.substringAfterLast(':') ?: ""
 
-    /** 把 href 还原成相对当前集合的直接子项名称。 */
-    private fun childName(href: String): String {
-        val basePath = URL(root).path
-        val path = runCatching { URL(URL(root), href).path }.getOrDefault(href)
-        val child = if (path.startsWith(basePath)) {
-            path.removePrefix(basePath).trim('/')
-        } else {
-            path.trim('/').substringAfterLast('/')
-        }
-        if (child.isEmpty() || child.contains('/')) return ""
-        return runCatching { URLDecoder.decode(child, "UTF-8") }.getOrDefault(child)
+    /**
+     * 把 href 还原成相对「本次列出的集合」的直接子项名称。
+     * - 集合自身（多数服务器在 Depth:1 里会返回）必须跳过，否则递归时目录名会不断叠加；
+     * - 只接受直接子项，深层路径一律忽略，避免把孙级文件记成当前层的条目；
+     * - href 既可能是绝对路径，也可能是相对当前集合或相对 root 的路径，两种 base 都试一次。
+     */
+    /**
+     * 统一 path 比较基准：去掉 query / fragment、解掉百分号编码、去掉尾部斜杠。
+     * 上传用 `%20` / `%E4%B8%AD` 这类编码，服务器 href 却可能返回已解码的中文或空格；
+     * 直接拿编码后的字符串做 startsWith 会让整个子目录被判成「不属于本集合」而整批丢弃，
+     * 表现就是「同步成功但少了一部分文件」。
+     */
+    private fun normalizePath(value: String): String {
+        val cleaned = value.substringBefore('?').substringBefore('#')
+        return runCatching {
+            // URLDecoder 会把 + 当空格，而上传时用的是 %20；文件名真含 + 时要保留。
+            URLDecoder.decode(cleaned.replace("+", "%2B"), "UTF-8")
+        }.getOrDefault(cleaned).trimEnd('/')
     }
 
+    private fun childName(href: String, collection: URL): String {
+        val basePath = normalizePath(collection.path)
+        val candidates = listOf(
+            runCatching { URL(collection, href).path }.getOrDefault(""),
+            runCatching { URL(URL(root), href).path }.getOrDefault(""),
+            href,
+        )
+        val paths = candidates.map { normalizePath(it) }.filter { it.isNotEmpty() }
+        // 任一解析方式指向集合自身就跳过：不同服务器返回绝对 / 相对 href 的写法不一致，
+        // 只要有一个 base 能认出「这是自己」，就不能把它当成子目录再递归一层。
+        if (paths.any { it == basePath }) return ""
+        for (path in paths) {
+            if (!path.startsWith("$basePath/")) continue
+            val child = path.removePrefix("$basePath/")
+            if (child.isEmpty() || child.contains('/')) continue
+            return child
+        }
+        return ""
+    }
+
+    /**
+     * 不同 WebDAV 服务返回的 getlastmodified 格式差别很大：坚果云 / nginx-dav 用
+     * RFC 1123，Nextcloud 常用 ISO 8601，部分服务直接给 `yyyy-MM-dd HH:mm:ss`。
+     * 少解析一种格式，就会让这批文件的远端时间变成 0，被同步逻辑当成「时间未知」整批跳过。
+     */
     private fun parseTime(value: String): Long {
         if (value.isBlank()) return 0L
-        return runCatching {
-            SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US)
-                .parse(value)?.time ?: 0L
-        }.getOrElse {
-            runCatching {
-                SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
-                    .parse(value)?.time ?: 0L
-            }.getOrDefault(0L)
+        for (pattern in TIME_PATTERNS) {
+            val time = runCatching {
+                SimpleDateFormat(pattern, Locale.US)
+                    .apply { isLenient = false }
+                    .parse(value)?.time
+            }.getOrNull()
+            if (time != null && time > 0L) return time
         }
+        // 少数服务直接返回 epoch 秒 / 毫秒
+        return value.toLongOrNull()?.let { if (it > 1_000_000_000_000L) it else it * 1000L } ?: 0L
     }
 
     private companion object {
@@ -326,6 +441,15 @@ class WebDavClient(
         const val BUFFER_SIZE = 64 * 1024
         const val USER_AGENT = "TrimeLocalVoice-WebDAV/1.0"
         const val MAX_REDIRECTS = 3
+        const val MAX_NETWORK_RETRIES = 2
+        const val RETRY_DELAY_MS = 400L
+        val TIME_PATTERNS = listOf(
+            "EEE, dd MMM yyyy HH:mm:ss zzz",
+            "yyyy-MM-dd'T'HH:mm:ssXXX",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd HH:mm:ss zzz",
+        )
         val REDIRECT_CODES = setOf(301, 302, 307, 308)
         val XML_MEDIA_TYPE = "application/xml; charset=utf-8".toMediaType()
         val OCTET_STREAM = "application/octet-stream".toMediaType()

@@ -207,3 +207,192 @@ python scripts/repack_apk.py "$APK" ../Trime-LocalVoice-v31-arm64-v8a.apk
 最后一块 PCM → acceptWaveform(0.6s 静音) → while isReady: decode
             → inputFinished()          → while isReady: decode → getResult()
 ```
+
+## v33：流式出字改到文本框、加载时机统一、新增 Paraformer 流式引擎
+
+| 改动 | 处理 |
+| --- | --- |
+| 流式中间文字在候选栏 | 改为直接写进目标输入框：`TrimeInputMethodService.updateVoiceComposing()` 用 `InputConnection.setComposingText()` 增量替换，边说边出字；松手后 `commitVoiceText()` → `commitText()` 自动把 composing 区替换成最终结果（简繁转换 / 离线翻译链路完全复用）。取消、识别失败、会话超时由 `cancelVoiceComposing()` 清掉未定稿的半句话。候选栏只保留麦克风 + RMS 波形 |
+| 流式加载方式与其它引擎不一致 | 去掉 `VoiceLifecycle` 里流式专属的键盘预加载，以及「正在加载流式模型，语音会先缓冲」的专属提示；统一成按住语音键时按需加载，提示与其它引擎同为「正在加载本地模型，首次加载可能较慢…」。加载期间 PCM 继续排在 `Channel` 里，模型就绪后回放再逐块出字，开头语音不丢 |
+| 下载地址没显示全 | 「模型下载地址」弹窗不再用 `setMessage + setAdapter`（长说明会把列表挤出可视区），改为把说明放进列表首行 Header，官方 / 3 个主镜像 / 2 个备用镜像共 6 条**完整地址**全部逐条多行显示，点某条即复制该条地址。「模型下载源」切换弹窗也恢复显示每个源对示例模型的完整地址 |
+| 增加流式本地引擎 | 查 BiBi-Keyboard `models` release 找到两套本分支还没用上的流式 ZIP：`sherpa-onnx-streaming-paraformer-bilingual-zh-en.zip`、`...trilingual-zh-cantonese-en.zip`；AAR 里已有 `OnlineParaformerModelConfig`（字段 `encoder` / `decoder`）与 `OnlineModelConfig.paraformer`，**无需新增依赖或 so**。新增第 9 个引擎家族 `streaming_paraformer`，`StreamingSherpaEngine.buildConfig()` 按家族构造 Transducer 或 Paraformer 配置（Paraformer 分支按 AAR 官方示例显式写 `modelType="paraformer"`，否则 native 会按默认架构去找 joiner），两条家族共用同一套录音 / 解码 / 生命周期链路 |
+| 文案 | 设置项「下载并安装模型 / 本地语音包」改为「下载并安装模型」，弹窗标题同步 |
+| GitHub 备份 | 本轮按要求暂停，不执行 `commit` / `push`；源码改动只留在本地工作区 |
+
+### 新增的两套流式模型（可一键下载安装）
+
+包内同时含 fp32 与 int8，安装器只复制 int8 三件套到 `voice/streaming_paraformer/<规格>/`，
+安装后约 230 MB；ZIP 本身约 1 GB，文件名与解压大小取自 release 包中央目录实测：
+
+| 规格 | ZIP | tokens.txt | encoder.int8.onnx | decoder.int8.onnx |
+| --- | --- | --- | --- | --- |
+| Paraformer 中英 | `...-bilingual-zh-en.zip` | 75,756 B | 165,462,184 B | 71,664,561 B |
+| Paraformer 中粤英 | `...-trilingual-zh-cantonese-en.zip` | 81,289 B | 166,362,800 B | 72,062,549 B |
+
+release 里还有一个 `sherpa-onnx-qnn-x-asr-streaming-zipformer-transducer-...-android-aarch64.zip`
+（约 542 MiB），需要高通 QNN NPU 与额外 `qnn-libs`，只适用于特定芯片，暂不纳入通用 CPU 分发。
+手动放置 / ZIP 导入同样支持：`voice/streaming_paraformer/` 下放 `encoder*.onnx` /
+`decoder*.onnx` / `tokens.txt` 即可，`VoiceModels` 会按别名扫描。
+
+## v34：缩短首次部署耗时
+
+首次部署是三段串行工作：
+
+1. `UserDataManager.sync()` 双向镜像使用者资料夹（SAF 逐个文件查属性 / SHA-256 / 复制）；
+2. `DataManager.sync()` 把 11MB 预设数据从 assets 复制到共享目录；
+3. librime `start_maintenance(true)` 编译 `luna_pinyin` / `stroke` 等词典。
+
+第 3 步在 `build/` 为空时无法跳过，是 librime 固有成本；之后有编译缓存只做增量重建，
+所以只有第一次慢。本轮把前两步里重复、无用的 I/O 去掉，并让等待过程有明确反馈。
+
+| 改动 | 处理 |
+| --- | --- |
+| 编译产物被反复同步 | `UserDataManager` 把 `build/` 与 `voice/` 一起排除出资料夹双向镜像（本地遍历、远端收集、历史 manifest 三处都过滤）。词典 `.table.bin` / `.prism.bin` 有几十 MB、与 librime 版本绑定，镜像只会让每次部署多做一轮 hash + SAF 复制，同步回旧产物还会污染新版本工作区；历史 manifest 里的旧条目一并忽略，避免被误判成「本地删除」 |
+| 覆盖安装后全量重写预设数据 | `DataManager.copyFile()` 复制前先比对目标文件的 SHA-256 与 `checksums.json` 记录值，一致就跳过写入并保留原 mtime。`checksums.json` 丢失 / 损坏时 diff 会把全部文件判成 `CreateFile`，重写会刷新所有 `.yaml` 的 mtime，让 librime 的 `DetectModifications` 误以为工作区全变了 |
+| checksums 写一半被杀 | `checksums.json` 改用 `AtomicFile` 原子写，中断不会留下损坏文件触发下一次全量复制 |
+| 不知道卡在哪一步 | 部署通知增加阶段文字：「正在同步使用者资料夹…」→「首次部署：正在编译词库，可能需要几分钟…」/「正在部署：重新编译有变更的方案…」，简 / 繁 / 英文三套文案 |
+| 首次编译超过 5 分钟误报失败 | `Rime.deploy()` 的等待上限从 5 分钟放宽到 10 分钟（`syncUserData()` 保持 5 分钟） |
+| GitHub 备份 | 继续暂停，本轮不 `commit` / 不 `push` |
+
+若还要进一步压缩第 3 步，只能减少首次需要编译的数据（例如移除未被方案引用的
+`essay.txt` 5.7 MB 和笔画词典 `stroke.dict.yaml` 2.2 MB，代价是失去笔画输入与八股文词库），
+或把编译好的 `build/*.bin` 预置进 APK（需要一台已部署过的真机导出）。两者都会改变默认功能
+或引入版本兼容风险，本轮未做。
+
+## v35：精简预设词库、WebDAV 目录核查、OpenCC 打包确认
+
+| 项目 | 结论 / 处理 |
+| --- | --- |
+| 删除 `essay.txt` 与笔画词库 | 按用户确认移除 `shared/essay.txt`(5.7 MB)、`shared/stroke.dict.yaml`(2.2 MB)、`shared/stroke.schema.yaml`。`luna_pinyin.dict.yaml` 的 `use_preset_vocabulary` 改为 false（librime 的 `PresetVocabulary` 默认词库名就是 `essay`，留 true 会去找已删除的文件）；`luna_pinyin.schema.yaml` 移除 stroke 依赖、`reverse_lookup_translator`、`reverse_lookup` 段、识别模式与 `grammar:/hant?` 补丁；`default.yaml` 的 `schema_list` 只保留随包提供的 3 个方案（原来另列了 4 个本包根本没有的方案，用户自定义 `default.custom.yaml` 时会报 missing input schema）。**代价：失去笔画输入与八股文预设词频** |
+| 部署安全性 | `ConfigNeedsUpdate` 按源文件 mtime 判断，改过的 yaml 会触发重新生成 build 配置；`checksums.json` 由 gradle 重新生成（54 条），覆盖安装时 `DataManager` 会把设备上旧的三份文件删掉。设备上残留的 `build/stroke.*.bin` 不会被引用，需要清理可在资料夹里手动删。若之前在方案列表里手动勾选过「笔画」，请取消勾选 |
+| WebDAV 是否新建文件夹 | **是**：`WebDavPrefs.remoteDir` 默认 `trime`，`WebDavClient.ensureRoot()` 会对 `地址/trime/` 发 MKCOL，在服务器上新建同名目录；`ensureDir()` 上传文件时还会在远端逐级建子目录；本地则由 `download()` 的 `mkdirs()` 按远端目录结构建父目录。另外 `OpenCCDictManager` 以前会在使用者资料夹无条件建一个空的 `rime/opencc/`（与 WebDAV 无关，但同步时会被看到）。修正：`ensureRoot()` 改为「远端目录留空就完全不 MKCOL；填了目录先 PROPFIND Depth:0 探测，只有不存在才创建」，设置项 hint 与失败排查文案写明留空＝不新建；`OpenCCDictManager.userDir` 改为导入词典时才创建 |
+| APK 是否打包 OpenCC 文件夹 | **是，且必需，保留**：`assets/shared/opencc/` 37 个文件、原始 1,325,096 B（压缩后约 0.55 MB），由 gradle `installOpenCCData` 从 `librime/deps/opencc/data` 生成，供 librime 的 `simplifier`（`s2t.json` / `t2tw.json` 等）与 `OpenCCDictManager` 使用。另有 `assets/voice/zh_convert.txt`(682,884 B) 是语音输出简繁转换的另一套数据，两者用途不同，不是重复打包 |
+| 体积 | `assets/shared` 11 MB → 2.6 MB；APK 25,310,711 B → **22,041,880 B**（−3,268,831 B，约 3.1 MB），首次部署少编译两个大词库 |
+| GitHub 备份 | 继续暂停，本轮不 `commit` / 不 `push` |
+
+⚠️ 无真机连接，删词库后的部署未做实机验证；若首次部署报「missing input schema」，
+检查使用者资料夹里的 `default.custom.yaml` 是否还手动列着 stroke / bopomofo 等方案。
+
+## v36：修复 WebDAV 递归列目录 404（backgrounds/backgrounds）
+
+用户截图报错「读取远端目录 backgrounds/backgrounds 失败：HTTP 404」。这**不是** v35
+「远端目录留空不新建文件夹」改错了，也不是删词库引起，而是 `WebDavClient` 自 v22 起就有的
+路径解析缺陷被触发：PROPFIND Depth:1 的响应里，坚果云会把**当前集合自身**也作为一个
+`<d:response>` 返回；旧 `childName()` 始终拿全局 `root`（`.../dav/trime/`）去减前缀，递归进
+`backgrounds/` 时自身 href `/dav/trime/backgrounds/` 被算成子项 `backgrounds`，于是拼出
+`backgrounds/backgrounds` 再去 PROPFIND，必然 404。同一缺陷在「远端目录留空」时表现为
+二级目录文件被整批跳过（child 含 `/` 直接丢弃）。
+
+| 改动 | 处理 |
+| --- | --- |
+| 基于错误的集合解析 | `list(relative)` 把本次请求的集合 URL 传给 `parsePropfind()`；`childName()` 改为以该集合 path 为基准，同时尝试以集合和以 root 作为相对 href 的解析 base |
+| 集合自身误判 | 任一解析结果等于当前集合 path 就跳过；只接受直接子项，深层路径不再混入当前层 |
+| 文件名含 `+` | 解码前把 `+` 还原成 `%2B`，避免 `URLDecoder` 把真名里的 `+` 变成空格（上传用 `%20`） |
+| 单目录失败拖垮整批 | `WebDavSync.listRemote()` 现在把子目录读取失败记入 `Result.failed`（显示「同步完成（部分失败）」）并继续其它目录；只有根目录读不到才整体抛错，这时才该检查地址 / 账号 / 权限 |
+| 体积与签名 | 22,041,880 B 不变，证书 `629c7023…` 一致，可直接覆盖 v35；GitHub 备份继续暂停 |
+
+装 v36 后直接点「立即同步」即可，无需改地址或清空已同步的目录。
+
+## v37：WebDAV 网络异常加固（14 项 DNS 失败）
+
+用户第二张截图是「WebDAV 同步完成（部分失败）」，14 项全部为
+`Unable to resolve host "dav.jianguoyun.com": No address associated with hostname`。
+**这不是又一处路径 bug，反而证明 v36 生效了**：远端 `symbols.yaml`、`wubi86.dict.yaml` 等
+14 个文件已被正确列出并进入下载 / 上传阶段（PROPFIND 已通），失败发生在随后 GET / PUT 时
+设备解析不到坚果云域名 —— 属于手机侧 DNS / 网络问题。但客户端缺重试与清晰提示，本轮补上。
+
+| 改动 | 处理 |
+| --- | --- |
+| 一次 DNS 抖动毁掉整批 | `WebDavClient.request()` 对 `UnknownHostException` / `InterruptedIOException` 及连接重置、网络不可达等瞬时 `IOException` 最多重试 2 次（400 / 800 ms 退避）。OkHttp 的 `retryOnConnectionFailure` 在域名解析返回空地址时不会重试，所以原来一次抖动就让十几个文件连挂。只重试 `IOException`，HTTP 4xx/5xx 仍按状态码正常处理；每次重试重建 Request / RequestBody，`fileBody` 每次重新开流，PUT 重发安全 |
+| 14 条相同错误淹没根因 | 部分失败弹窗把网络类失败聚合：标题改「WebDAV 同步失败：网络异常」，显示失败项数、原始错误、受影响文件与可操作建议（切 Wi-Fi / 移动数据、开关飞行模式刷新 DNS）；其它类型失败仍逐条列出。整体失败弹窗的排查建议也补上 DNS 条目 |
+| 状态栏误报「刚刚同步」 | `WebDavSync` 有失败项时不再写 `lastSyncTime`，`lastSyncResult` 前缀标「未完成 · 」，避免显示成一次成功同步 |
+
+客户端能自愈偶发抖动，但**无法代替可用网络**。若重试后仍是 `Unable to resolve host`，
+需在手机上处理：确认该网络能打开网页、切换 Wi-Fi / 移动数据、开关一次飞行模式刷新 DNS，
+或换一个 DNS；地址保持 `https://dav.jianguoyun.com/dav`，账号用邮箱 + 网页端生成的应用密码。
+
+体积 22,041,880 B 不变，证书 `629c7023…` 一致可覆盖 v36；GitHub 备份继续暂停。
+
+## v38：解决「跳过 90 个文件」、SYNC 文件夹与重装恢复
+
+用户重新安装后本地 rime 目录为空，同步结果是「上传 16 · 下载 13 · 跳过 90」，配置没恢复完整，
+同时用户目录里多出一个 `sync/` 文件夹。
+
+**90 个跳过的成因**：`WebDavSync` 只在两边都有同名文件时才可能跳过；坚果云 PROPFIND 返回的
+`getlastmodified` 有部分格式（或干脆不返回该属性）解析不出时间，`remoteTime` 变成 0，于是走进
+「时间未知 → 保守跳过」。另外 librime 的 `sync/` 快照目录此前没被排除，快照文件也混进了
+这批两边同名的条目，把数字放大。这些文件并非「已同步」，只是没被处理。
+
+**SYNC 文件夹不是 WebDAV 建的**：`deployer.cc` 的 `sync_dir("sync")` +
+`user_data_sync_dir() = sync/<installation_id>/` 是 librime 的用户词典备份目录，存放
+`*.userdb.txt` 与配置备份。真正触发它出现的是 `startWebDavSync()` 在同步成功后调用的
+`syncUserData()` —— 它内部跑 `RimeSyncUserData()`，v37 首次同步成功时就把这个目录建了出来。
+
+| 改动 | 处理 |
+| --- | --- |
+| 时间解析太窄 | `parseTime()` 依次尝试 RFC 1123、ISO 8601（含毫秒/时区）、`yyyy-MM-dd HH:mm:ss`、epoch 秒/毫秒，并关掉 `SimpleDateFormat` 的宽松解析；仍解析不出的才计为时间未知 |
+| 跳过原因看不出来 | `Result` 增加 `skippedNoTime`，状态栏显示「跳过 90（其中 N 项服务器未提供修改时间）」，不再让人误以为同步完成 |
+| 重装后恢复不完整 | 设置里新增「从服务器恢复（覆盖本地同名文件）」，带确认弹窗；`WebDavSync.sync(preferRemote = true)` 对所有远端文件强制下载覆盖，且**不上传**本机重装后的预设文件，避免污染服务器备份 |
+| `sync/` 参与同步 | `EXCLUDED_DIRS` 加入 `sync`；顺带把真正的文件名 `.sync-manifest.json` 排除（原来写的 `sync_manifest` 前缀匹配不到它） |
+| WebDAV 每次都新建 `sync/` | 同步成功后由 `syncUserData()`（导出用户词典快照）改为 `updateConfig()`（重新加载配置），不再触发 librime 的快照导出。已存在的 `sync/` 是 Rime 自带备份，可手动删除；后台定时同步若开启仍会按 Rime 原逻辑生成 |
+
+⚠️ **重要**：截图里「上传 16」很可能是重装后 APP 重新部署的预设文件被推到了服务器。若远端原本
+有同名的自定义配置，可能已被覆盖 —— 建议先去坚果云检查这几个文件的修改时间 / 内容，再点
+「从服务器恢复」，否则恢复回来的仍是预设。恢复完成后建议重新部署一次让 Rime 载入配置。
+
+体积 22,045,976 B（+4,096 B），证书 `629c7023…` 一致可覆盖 v37；GitHub 备份继续暂停。
+
+## v39：修复「从服务器恢复」点了没反应
+
+用户反馈点「从服务器恢复」后没有任何反应。排查后不是网络问题，而是**入口被开关挡住 +
+结果不可见 + 恢复后没生效**三件事叠在一起：
+
+| 成因 | 处理 |
+| --- | --- |
+| 恢复条目被置灰 | `updateWebDavUi()` 原来用 `prefs.enabled && isConfigured()` 控制 `isEnabled`。重装后「启用 WebDAV 同步」默认是关的，条目变灰，点击完全无响应；`WebDavSync.sync()` 里的 `require(prefs.enabled)` 也会直接抛错。现在手动「立即同步 / 从服务器恢复」都不再依赖这个开关，它只管 `BackgroundSyncWork` 的后台定时同步；恢复条目恒可点，配置没填时给明确弹窗而非静默 |
+| 点了看不到动作 | 点击后立刻 Toast「从服务器恢复 开始…」，状态栏实时显示进度（`(n/N) 文件名` + 完整远端地址）；进度回调从 IO 线程投递到主线程，并用 `AtomicBoolean` 防止迟到进度覆盖最终状态 |
+| 结果一闪而过 | 成功也改用弹窗：显示远端地址、服务器上可恢复文件数、下载覆盖数、本地独有保留数、失败数。失败弹窗标题区分「从服务器恢复失败」并补上目录/开关排查项 |
+| 远端目录指错＝下载 0 个 | `WebDavClient` 新增 `rootUrl()` / `topLevelNames()`；`WebDavSync.Result` 增加 `remoteFiles` / `remoteRootUrl` / `remoteTopLevel`。远端一个文件都扫不到时弹「服务器上没有找到可恢复的文件」，列出该地址下的一级内容，提示把「远端目录」改成备份所在的子目录名；这种情形也不再刷新「上次同步」时间，结果标「未完成」 |
+| 文件回来了但配置没生效 | 恢复成功且有下载时自动 `rime.runOnReady { deploy() }` 全量重新部署（yaml / 词库需要重新编译），不再只 `updateConfig()`。普通同步仍只 `updateConfig()`，避免每次全量编译；`deploy()` 不调 `syncUserData()`，不会再生成 `sync/` 目录 |
+
+装 v39 后不需要打开「启用 WebDAV 同步」开关，只要地址 / 账号 / 应用密码填对，
+直接点「从服务器恢复」→ 确定，就能看到进度和结果弹窗。若弹「服务器上没有找到可恢复的文件」，
+按弹窗列出的目录名把「远端目录」改对再试一次。
+
+体积 22,050,072 B（+4,096 B），sha 前缀 `4324d6c0`，证书 `629c7023…` 一致可覆盖 v38；
+`apksigner` v1/v2/v3 通过。GitHub 备份继续暂停，改动仍留在工作树未提交。
+未实机验证：真机上的 PROPFIND 响应与坚果云目录结构。
+
+## v40：恢复「同步成功但少了一部分文件」
+
+用户装 v39 后反馈：WebDAV 上 trime 目录里的文件恢复到手机时漏了一部分，界面却报成功。
+排查到两个真实成因，并补上逐项核对清单：
+
+| 成因 | 处理 |
+| --- | --- |
+| href 编码不一致，整批子目录被丢弃 | `WebDavClient.childName()` 原先拿**编码后**的 `collection.path` 与 href 做 `startsWith`。上传用 `%20` / `%E4%B8%AD`，服务器 href 可能返回已解码的空格或中文，于是整个子目录被判成「不属于本集合」而静默丢掉。新增 `normalizePath()`：去掉 query/fragment、统一 URL 解码、去尾部斜杠；集合 base 与三种 href 候选（集合相对、root 相对、href 本身）都在归一化后比较 |
+| 目录被误判成文件 | 部分服务器不给 `<d:collection/>`，但 href 以 `/` 结尾；原来会把它当文件去 GET，目录下的文件全部漏掉。`parsePropfind()` 现在把「href 以 / 结尾」也视为集合；`MAX_DEPTH` 8 → 16 |
+| 恢复后自动部署把文件对齐掉 | `deploy()` 内部会跑 `UserDataManager.sync()`；在「使用者资料夹 / 外部同步」模式下，外部目录与本地做双向对齐，可能覆盖或删除刚恢复的文件。取消自动部署，改为结果弹窗里的「重新部署并关闭」按钮，由用户主动触发，并在弹窗里说明该风险 |
+| 排除规则吞掉用户资料 | 恢复模式放宽 `sync/`、`cache/`、`.git/`、`.gradle/`：只排除 `voice/`（模型）和 `build/`（编译缓存）。`sync/<id>/` 里的 `*.userdb.txt` 是 librime 用户词典快照，重装后本就该一起拉回来；普通同步仍按老规则排除 |
+| 少文件却报成功 | 恢复结束重新扫本地，逐项比对远端清单，`Result.missingLocal` 列出「服务器有、本地没有」的文件；`describe()` 追加「未恢复 N」，状态栏标「未完成」。结果弹窗显示 PROPFIND 原始 response 数、解析出条目数、可恢复文件数、按规则跳过清单、未恢复清单与文件路径示例，并提供「复制核对清单」按钮（可发回定位）。若示例路径都落在同一子目录，会提示把「远端目录」改成该目录名 |
+
+装 v40 后再点一次「从服务器恢复」，看结果弹窗：
+- 「核对通过」＝扫描到的远端文件都已写入本地；
+- 「从服务器恢复不完整」＝把清单复制出来，看缺失路径是不是含中文 / 空格 / 特殊符号，或是否在被跳过的清单里；
+- 文件路径示例若全是 `trime/xxx`，说明「远端目录」多指了一层，改成 `trime` 再恢复。
+
+体积 22,054,168 B（+4,096 B），sha 前缀 `b582a418`，证书 `629c7023…` 一致可覆盖 v39；
+`apksigner` v1/v2/v3 通过。GitHub 备份继续暂停，改动仍留在工作树未提交。
+
+## v41：本地语音设置页精简文案与收紧间距
+
+| 项目 | 改动 |
+| --- | --- |
+| 模型状态 | 未检测到模型时只显示「未检测到完整模型」；`status.ready` 时才显示「已检测到：<模型名称>」（优先取 `ModelVariant.displayName`，退回到已安装目录名）。去掉「· 家族名」「路径 · 点击查看详情」和「点击一键下载推荐模型」。点击该项仍可查看详情 / 触发推荐下载 |
+| 语音识别引擎 | 没有可用模型时显示「当前：空」，检测到才显示模型名称；去掉「· 自动选择」「（未安装）」和「点击选择已安装的语音模型」 |
+| 其余摘要 | 推理线程数、简繁转换、翻译语言包、下载源、模型列表、删除模型的第二行说明与「点击…」提示全部去掉，摘要统一压成一行 |
+| 条目间距 | 新增 `onViewCreated()`，用 `RecyclerView.OnChildAttachStateChangeListener` 在 item 绑定后把普通设置项的上下内边距收到 4dp、最小高度置 0；分组标题（无 `android.R.id.summary`）保持原留白，避免标题贴住上一组。配合摘要单行化，整页明显更紧凑 |
+
+体积 22,054,168 B（与 v40 相同，ZIP 对齐巧合；`classes.dex` 9,269,172 → 9,269,668 B），
+sha 前缀 `dbbc76d7`，证书 `629c7023…` 一致可覆盖 v40；`apksigner` v1/v2/v3 通过。
+GitHub 备份继续暂停，改动仍留在工作树未提交。

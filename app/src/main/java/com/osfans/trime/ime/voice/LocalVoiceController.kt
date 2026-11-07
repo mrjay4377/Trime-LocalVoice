@@ -2,6 +2,7 @@
  * 本地语音会话：按住语音键开始录音，松手结束并识别上屏。
  * 方法参考 trime-mie 的 BuiltInVoiceController，去掉在线引擎、预览与 UI 相位的依赖。
  * 模型只从「用户目录 / voice」读取，音频只在设备本地推理。
+ * 流式引擎的中间结果直接写进目标输入框（composing），候选栏只保留录音波形提示。
  */
 package com.osfans.trime.ime.voice
 
@@ -41,8 +42,6 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
         var peakLevel = 0f
         var silentMs = 0
         var heardSpeech = false
-        /** 引擎加载期间显示在语音栏的状态文字；首个真实中间结果出现时清空。 */
-        var statusText = ""
     }
 
     @Volatile
@@ -59,26 +58,11 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
     /** 实时音量（0..1），驱动候选栏两侧的波形起伏；回调在主线程执行。 */
     var onLevelChanged: ((Float) -> Unit)? = null
 
-    /** 流式引擎的中间识别结果，显示在候选栏语音栏；回调在主线程执行。 */
-    var onPartialText: ((String) -> Unit)? = null
-
     private fun publishRecording(active: Boolean) {
         if (recording == active) return
         recording = active
-        if (!active) {
-            current?.statusText = ""
-            main.post {
-                onLevelChanged?.invoke(0f)
-                onPartialText?.invoke("")
-            }
-        }
+        if (!active) main.post { onLevelChanged?.invoke(0f) }
         main.post { onRecordingChanged?.invoke(active) }
-        // 模型加载可能比「按住」更早开始：语音栏出现时把已排队的状态文字补上，
-        // 否则用户只看到波形却不知道正在加载，误以为「已经在说话却没出字」。
-        if (active) {
-            val status = current?.statusText.orEmpty()
-            if (status.isNotEmpty()) main.post { onPartialText?.invoke(status) }
-        }
     }
 
     /** 只保留一个 Toast：多条提示会排队显示，导致上屏文字后仍弹出旧的「正在录音」。 */
@@ -107,7 +91,7 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
         publishRecording(false)
         main.post {
             onLevelChanged?.invoke(0f)
-            onPartialText?.invoke("")
+            service.cancelVoiceComposing()
         }
         if (!LocalVoiceSettings.isEnabled(service)) {
             notice("请在设置 → 本地语音识别中启用语音输入")
@@ -189,22 +173,17 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
                 }
             }
 
-            /** 原生流式引擎：边说边把中间结果送到候选栏语音栏，松手后仍走 onFinal 上屏。 */
+            /** 流式引擎：中间结果直接写进目标输入框，松手后仍走 onFinal 定稿上屏。 */
             override fun onPartial(text: String) {
                 main.post {
                     if (current !== session || session.finished || !recording) return@post
-                    if (session.statusText.isNotEmpty()) session.statusText = ""
-                    onPartialText?.invoke(text)
+                    service.updateVoiceComposing(text)
                 }
             }
 
-            /** 模型加载中等阶段性提示，与中间结果共用语音栏但不互相覆盖。 */
+            /** 加载提示统一用 Toast，不再占用候选栏或输入框。 */
             override fun onStatus(text: String) {
-                main.post {
-                    if (current !== session || session.finished) return@post
-                    session.statusText = text
-                    if (recording) onPartialText?.invoke(text)
-                }
+                // 中间结果走目标输入框 composing，状态文字不再单独占一行。
             }
 
             override fun onError(message: String) {
@@ -218,16 +197,16 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
         }
 
         // 流式家族用 OnlineRecognizer 增量解码；其余家族保持松手后整段推理。
+        // 加载时机与其它引擎统一：不在键盘弹出时给流式单独预加载，按住语音键时按需加载，
+        // 加载完成前 PCM 先排队，加载好后回放再逐块出字，开头语音不会丢。
         val engine: AsrEngine = if (VoiceModels.isStreaming(familyId)) {
             StreamingSherpaEngine(
                 context = service,
                 scope = scope,
                 listener = listener,
                 model = model,
-                onLoadStart = {
-                    notice("正在加载流式模型，语音会先缓冲，不会丢字…")
-                    listener.onStatus("正在加载流式模型，语音已缓冲…")
-                },
+                familyId = familyId,
+                onLoadStart = { notice("正在加载本地模型，首次加载可能较慢…") },
             )
         } else {
             OfflineSherpaEngine(
@@ -359,7 +338,8 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
 
     private fun cleanup(session: Session) {
         publishRecording(false)
-        main.post { onPartialText?.invoke("") }
+        // 结果成功上屏后 voiceComposingActive 已置 false，这里只清理「取消 / 失败」残留的半句话。
+        main.post { service.cancelVoiceComposing() }
         session.finished = true
         session.watchdog?.cancel()
         session.timeoutJob?.cancel()

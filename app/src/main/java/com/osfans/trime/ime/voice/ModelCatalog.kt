@@ -209,6 +209,33 @@ object ModelCatalog {
                 spec("joiner-480ms.onnx", 10_260_467L, ""),
             ),
         ),
+        // BiBi-Keyboard models release 里另外两套「原生流式」ZIP：Paraformer 架构，
+        // 用 OnlineParaformerModelConfig 加载。包内同时有 fp32 与 int8，这里只装 int8
+        // 三件套（约 230MB），下载包本身约 1GB。文件名/大小取自 ZIP 中央目录实测。
+        ModelVariant(
+            familyId = VoiceModels.STREAMING_PARAFORMER_FAMILY,
+            key = "bilingual-zh-en",
+            label = "Paraformer 中英 int8（边说边出字）",
+            zipName = "sherpa-onnx-streaming-paraformer-bilingual-zh-en.zip",
+            downloadMiB = 973,
+            files = listOf(
+                spec("tokens.txt", 75_756L, ""),
+                spec("encoder.int8.onnx", 165_462_184L, ""),
+                spec("decoder.int8.onnx", 71_664_561L, ""),
+            ),
+        ),
+        ModelVariant(
+            familyId = VoiceModels.STREAMING_PARAFORMER_FAMILY,
+            key = "trilingual-zh-cantonese-en",
+            label = "Paraformer 中粤英 int8（边说边出字）",
+            zipName = "sherpa-onnx-streaming-paraformer-trilingual-zh-cantonese-en.zip",
+            downloadMiB = 974,
+            files = listOf(
+                spec("tokens.txt", 81_289L, ""),
+                spec("encoder.int8.onnx", 166_362_800L, ""),
+                spec("decoder.int8.onnx", 72_062_549L, ""),
+            ),
+        ),
     )
 
     /** 官方原始地址，供「手动下载」展示与复制。 */
@@ -230,6 +257,21 @@ object ModelCatalog {
             rows += "备用镜像 ${index + 1} · $host" to (prefix + official)
         }
         return rows.distinctBy { it.second }
+    }
+
+    /**
+     * 「模型下载源」弹窗用：把每个下载源都用一个示例模型拼出完整地址。
+     * 自动模式显示它优先尝试的第一条镜像；其余显示各自前缀 + 官方地址。
+     */
+    fun sourceExamples(variant: ModelVariant): List<Pair<String, String>> {
+        val official = officialUrl(variant)
+        return SOURCES.mapIndexed { index, name ->
+            val url = when (index) {
+                0 -> (PREFIXES.drop(2) + EXTRA_MIRRORS).first() + official
+                else -> PREFIXES.getOrElse(index) { "" } + official
+            }
+            name to url
+        }
     }
 
     fun byId(id: String): ModelVariant? = VARIANTS.firstOrNull { it.id == id }

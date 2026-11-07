@@ -37,8 +37,22 @@ object DeployNotification {
     const val MESSAGE_ID = 2331
     private const val EXTERNAL_SYNC_FALLBACK_MESSAGE_ID = 2333
 
+    /** 部署各阶段的说明，由 Kotlin 层设置；native 的 deploy/start 消息会复用它。 */
+    @Volatile
+    private var stageText: String? = null
+
     fun ensureChannel() {
         createNotificationChannel(CHANNEL_ID, appContext.getString(R.string.rime_daemon))
+    }
+
+    /** 更新「正在部署」通知的文字，让用户知道当前卡在同步还是首次编译词库。 */
+    fun showStage(text: String) {
+        stageText = text
+        showProgress()
+    }
+
+    fun clearStage() {
+        stageText = null
     }
 
     fun showProgress() {
@@ -47,7 +61,11 @@ object DeployNotification {
             .Builder(appContext, CHANNEL_ID)
             .setContentTitle(appContext.getString(R.string.rime_daemon))
             .setSmallIcon(R.drawable.ic_baseline_refresh_reversed_24)
-            .setContentText(appContext.getString(R.string.deploy_progress))
+            .setContentText(stageText ?: appContext.getString(R.string.deploy_progress))
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .bigText(stageText ?: appContext.getString(R.string.deploy_progress)),
+            )
             .setProgress(0, 0, true)
             .setOngoing(true)
             .setAutoCancel(false)
@@ -57,6 +75,7 @@ object DeployNotification {
     }
 
     fun showSuccess() {
+        clearStage()
         ensureChannel()
         NotificationCompat
             .Builder(appContext, CHANNEL_ID)
@@ -73,6 +92,7 @@ object DeployNotification {
     }
 
     fun showFailure(contentIntent: PendingIntent) {
+        clearStage()
         ensureChannel()
         NotificationCompat
             .Builder(appContext, CHANNEL_ID)
@@ -89,6 +109,7 @@ object DeployNotification {
     }
 
     fun cancel() {
+        clearStage()
         notificationManager.cancel(MESSAGE_ID)
     }
 

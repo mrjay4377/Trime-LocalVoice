@@ -481,3 +481,9 @@ app/src/main/jni/boost/
 # kotlin
 .kotlin
 
+# Local build cache / temporary scripts (never push these)
+.gradle-home/
+compile_log.txt
+run_compile.sh
+app/src/main/jni/boost-*.tar.xz
+

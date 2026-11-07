@@ -2,8 +2,9 @@
  * 原生流式离线识别：sherpa-onnx OnlineRecognizer（Transducer）。
  *
  * 与 OfflineSherpaEngine 的区别：按住语音键期间每来一块 PCM 就 acceptWaveform + 增量解码，
- * 把中间结果经 AsrListener.onPartial 送到候选栏语音栏实时显示；松手后 inputFinished 收尾，
- * 立即给出最终文本，不再对整段音频重新推理一次。
+ * 把中间结果经 AsrListener.onPartial 直接写进目标输入框（composing 增量替换）；松手后
+ * inputFinished 收尾，立即给出最终文本，不再对整段音频重新推理一次。
+ * 支持 Transducer（streaming_xasr）与 Paraformer（streaming_paraformer）两种 online 架构。
  *
  * 模型同样只从「用户目录 / voice」读取，音频只在设备本地推理，不联网。
  * 所有 sherpa 调用走反射，避免与 AAR 的 Kotlin 版本/混淆规则耦合。
@@ -281,28 +282,46 @@ class StreamingSherpaEngine(
     private val scope: CoroutineScope,
     private val listener: AsrListener,
     private val model: ResolvedVoiceModel,
+    private val familyId: String = VoiceModels.STREAMING_FAMILY,
     private val onLoadStart: () -> Unit = {},
 ) : AsrEngine {
     companion object {
-        /** 构造 OnlineRecognizerConfig；返回 (config, 稳定指纹) 供预加载与缓存复用。 */
-        fun buildConfig(context: Context, model: ResolvedVoiceModel): Pair<Any, String> {
+        /**
+         * 构造 OnlineRecognizerConfig；返回 (config, 稳定指纹) 供缓存复用。
+         * familyId 决定 online 架构：Transducer 三件套或 Paraformer 两件套。
+         */
+        fun buildConfig(
+            context: Context,
+            model: ResolvedVoiceModel,
+            familyId: String = VoiceModels.STREAMING_FAMILY,
+        ): Pair<Any, String> {
             val paths = model.paths
-            val transducer = Class.forName("com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig")
-                .getDeclaredConstructor().newInstance()
-            sherpaTrySetField(transducer, "encoder", paths.getValue("encoder.onnx"))
-            sherpaTrySetField(transducer, "decoder", paths.getValue("decoder.onnx"))
-            sherpaTrySetField(transducer, "joiner", paths.getValue("joiner.onnx"))
-
             val modelConfig = Class.forName("com.k2fsa.sherpa.onnx.OnlineModelConfig")
                 .getDeclaredConstructor().newInstance()
-            sherpaTrySetField(modelConfig, "transducer", transducer)
+            if (familyId == VoiceModels.STREAMING_PARAFORMER_FAMILY) {
+                val paraformer = Class.forName("com.k2fsa.sherpa.onnx.OnlineParaformerModelConfig")
+                    .getDeclaredConstructor().newInstance()
+                sherpaTrySetField(paraformer, "encoder", pathOf(paths, "encoder"))
+                sherpaTrySetField(paraformer, "decoder", pathOf(paths, "decoder"))
+                sherpaTrySetField(modelConfig, "paraformer", paraformer)
+                // AAR 自带示例（OnlineRecognizerKt.getOnlineModelConfig）给 Paraformer
+                // 显式写了 modelType="paraformer"；少了它 native 会按默认架构去找 joiner。
+                sherpaTrySetField(modelConfig, "modelType", "paraformer")
+            } else {
+                val transducer = Class.forName("com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig")
+                    .getDeclaredConstructor().newInstance()
+                sherpaTrySetField(transducer, "encoder", pathOf(paths, "encoder"))
+                sherpaTrySetField(transducer, "decoder", pathOf(paths, "decoder"))
+                sherpaTrySetField(transducer, "joiner", pathOf(paths, "joiner"))
+                sherpaTrySetField(modelConfig, "transducer", transducer)
+            }
             sherpaTrySetField(modelConfig, "tokens", paths.getValue("tokens.txt"))
-            // 省电模式下流式解码固定在单核：Transducer 每 480ms 只跑一个小 chunk，
+            // 省电模式下流式解码固定在单核：每个 chunk 只跑一小段特征，
             // 多核并行带来的调度/唤醒开销反而比节省的时间更费电。
             val threads = if (LocalVoiceSettings.isPowerSave(context)) {
                 1
             } else {
-                LocalVoiceSettings.threads(context, VoiceModels.STREAMING_FAMILY)
+                LocalVoiceSettings.threads(context, familyId)
             }
             sherpaTrySetField(modelConfig, "numThreads", threads)
             sherpaTrySetField(modelConfig, "provider", "cpu")
@@ -322,11 +341,20 @@ class StreamingSherpaEngine(
             // 会话结束完全由「松手」决定，不用端点检测：一旦 native 在尾部静音处判定
             // endpoint 并重置流，已解码的文字会被清掉，反而丢字。
             sherpaTrySetField(config, "enableEndpoint", false)
-            return config to fingerprint(context, model)
+            return config to fingerprint(context, model, familyId)
         }
 
-        private fun fingerprint(context: Context, model: ResolvedVoiceModel): String = buildString {
-            append(VoiceModels.STREAMING_FAMILY).append('|').append(model.dir.absolutePath).append('|')
+        /** 家族组名可能是 encoder.onnx / encoder.int8.onnx，按前缀取，兼容手动放置的模型。 */
+        private fun pathOf(paths: Map<String, String>, prefix: String): String =
+            paths.entries.firstOrNull { it.key.startsWith(prefix, ignoreCase = true) }?.value
+                ?: throw IllegalArgumentException("本地流式模型缺少 $prefix 文件")
+
+        private fun fingerprint(
+            context: Context,
+            model: ResolvedVoiceModel,
+            familyId: String,
+        ): String = buildString {
+            append(familyId).append('|').append(model.dir.absolutePath).append('|')
             model.paths.entries.sortedBy { it.key }.forEach { (name, path) ->
                 val file = File(path)
                 append(name).append('=').append(path)
@@ -368,7 +396,7 @@ class StreamingSherpaEngine(
                 // 设置页删除模型 / 切换开关时若并发释放，会触发 native use-after-free 直接杀进程。
                 SherpaOnlineManager.beginSession()
                 sessionHeld = true
-                val (config, key) = buildConfig(context, model)
+                val (config, key) = buildConfig(context, model, familyId)
                 val recognizer = SherpaOnlineManager.get(config, key, onLoadStart)
                 // 模型就绪：收起「加载中」，随后回放队列里已缓冲的 PCM，开头语音一个字都不丢。
                 listener.onStatus("")
@@ -380,10 +408,11 @@ class StreamingSherpaEngine(
                     totalBytes += chunk.size
                     s.acceptWaveform(toFloatArray(chunk), AudioRecorder.SAMPLE_RATE)
                     s.decodeReady()
-                    val text = s.text().trim()
+                    val text = sanitize(s.text())
                     if (text.length > bestText.length) bestText = text
                     if (text != lastPartial) {
                         lastPartial = text
+                        // 中间文本直接送目标输入框，不再经过候选栏语音栏。
                         listener.onPartial(text)
                     }
                 }

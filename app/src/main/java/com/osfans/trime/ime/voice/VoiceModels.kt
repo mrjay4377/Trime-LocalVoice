@@ -41,7 +41,11 @@ object VoiceModels {
     /** 原生流式家族：使用 sherpa-onnx OnlineRecognizer，按住期间边录边出字。 */
     const val STREAMING_FAMILY = "streaming_xasr"
 
-    fun isStreaming(familyId: String): Boolean = familyId == STREAMING_FAMILY
+    /** 流式 Paraformer 家族：OnlineParaformerModelConfig（中英 / 中粤英），同样边录边出字。 */
+    const val STREAMING_PARAFORMER_FAMILY = "streaming_paraformer"
+
+    fun isStreaming(familyId: String): Boolean =
+        familyId == STREAMING_FAMILY || familyId == STREAMING_PARAFORMER_FAMILY
 
     val FAMILIES: List<VoiceFamily> = listOf(
         VoiceFamily(
@@ -119,6 +123,18 @@ object VoiceModels {
             ),
             packageName = "sherpa-onnx-streaming-x-asr-480ms-zh-en",
         ),
+        // 流式 Paraformer：BiBi-Keyboard models release 里另外两套 ZIP 流式包。
+        // 只需 encoder / decoder / tokens（没有 joiner），走 OnlineParaformerModelConfig。
+        VoiceFamily(
+            id = STREAMING_PARAFORMER_FAMILY,
+            label = "流式 Paraformer（中英 / 中粤英，边说边出字）",
+            groups = listOf(
+                listOf("tokens.txt"),
+                listOf("encoder.int8.onnx", "encoder.onnx", "paraformer-encoder.onnx"),
+                listOf("decoder.int8.onnx", "decoder.onnx", "paraformer-decoder.onnx"),
+            ),
+            packageName = "sherpa-onnx-streaming-paraformer-bilingual-zh-en",
+        ),
     )
 
     fun family(id: String): VoiceFamily? = FAMILIES.firstOrNull { it.id == id }
@@ -169,10 +185,10 @@ object VoiceModels {
             appendLine("  必需文件：${f.groups.joinToString("、") { it.first() }}")
         }
         appendLine()
-        appendLine("[流式识别] 是唯一真正「边说边出字」的引擎：按住语音键时逐块解码并把中间结果显示在")
-        appendLine("候选栏语音栏，松手立即上屏；其余引擎都是松手后对整段录音推理一次。")
-        appendLine("任何 sherpa-onnx streaming Transducer 模型（含 encoder/decoder/joiner/tokens）")
-        appendLine("都可放到 voice/streaming_xasr/ 下的任意子目录使用。")
+        appendLine("[流式识别 / 流式 Paraformer] 是真正「边说边出字」的引擎：按住语音键时逐块解码，")
+        appendLine("中间结果直接写进目标输入框，松手后立即定稿上屏；其余引擎是松手后整段推理一次。")
+        appendLine("流式 Transducer 模型（含 encoder/decoder/joiner/tokens）放到 voice/streaming_xasr/ 下；")
+        appendLine("流式 Paraformer 模型（含 encoder/decoder/tokens）放到 voice/streaming_paraformer/ 下。")
         appendLine()
         appendLine("注意：本 voice 目录固定在应用私有目录，不随「使用者资料夹 / 数据位置」改变，")
         appendLine("也不参与资料夹同步（模型体积大，避免部署时被反复哈希、复制或误删）。")

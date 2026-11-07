@@ -68,9 +68,9 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
     /** 本地（离线）语音控制器：模型固定从「用户目录 / voice」读取。 */
     private val voiceController: LocalVoiceController by lazy {
         LocalVoiceController(service).apply {
+            // 候选栏只负责录音波形；流式中间文字由控制器直接写进目标输入框。
             onRecordingChanged = { active -> inputBarDelegate.setVoiceRecording(active) }
             onLevelChanged = { level -> inputBarDelegate.setVoiceLevel(level) }
-            onPartialText = { text -> inputBarDelegate.setVoicePartial(text) }
         }
     }
 

@@ -44,6 +44,9 @@
     <string name="reset_success">Reset Succeeded!</string>
     <string name="reset_failure">Reset Failed!</string>
     <string name="deploy_progress">Deploying…</string>
+    <string name="deploy_stage_sync">Syncing user data folder…</string>
+    <string name="deploy_stage_first_build">First deploy: compiling dictionaries, this may take a few minutes…</string>
+    <string name="deploy_stage_update">Deploying: rebuilding changed schemas…</string>
     <string name="other_ime">Other IMEs</string>
     <string name="ui_mode">UI mode</string>
     <string name="advanced">Advanced</string>

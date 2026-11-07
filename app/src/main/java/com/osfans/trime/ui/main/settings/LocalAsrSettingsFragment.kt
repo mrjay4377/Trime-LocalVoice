@@ -39,6 +39,7 @@ import androidx.preference.ListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceCategory
 import androidx.preference.SwitchPreferenceCompat
+import androidx.recyclerview.widget.RecyclerView
 import com.osfans.trime.R
 import com.osfans.trime.ime.voice.AudioRecorder
 import com.osfans.trime.ime.voice.InstalledModel
@@ -455,6 +456,26 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         refresh(ctx)
     }
 
+    /**
+     * 默认 Preference 布局上下留白偏大，整页看起来每项隔得很开。绑定后统一收紧普通
+     * 设置项的垂直内边距并去掉最小高度；分组标题没有 summary，保持原样不与上一组贴住。
+     */
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        val vertical = (4 * resources.displayMetrics.density).toInt()
+        listView.addOnChildAttachStateChangeListener(
+            object : RecyclerView.OnChildAttachStateChangeListener {
+                override fun onChildViewAttachedToWindow(child: View) {
+                    if (child.findViewById<View>(android.R.id.summary) == null) return
+                    child.minimumHeight = 0
+                    child.setPadding(child.paddingLeft, vertical, child.paddingRight, vertical)
+                }
+
+                override fun onChildViewDetachedFromWindow(child: View) = Unit
+            },
+        )
+    }
+
     override fun onResume() {
         super.onResume()
         context?.let(::refresh)
@@ -700,7 +721,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             rows += EngineRow.Option("catalog|${v.id}", v.label, state)
         }
         AlertDialog.Builder(ctx)
-            .setTitle("模型下载与管理")
+            .setTitle("下载并安装模型")
             .setAdapter(engineAdapter(ctx, rows, current = "", showRadio = false)) { dialog, which ->
                 val row = rows.getOrNull(which) as? EngineRow.Option ?: return@setAdapter
                 dialog.dismiss()
@@ -791,6 +812,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         rows: List<EngineRow>,
         current: String,
         showRadio: Boolean,
+        wrapSubtitle: Boolean = false,
     ): BaseAdapter = object : BaseAdapter() {
         override fun getCount(): Int = rows.size
         override fun getItem(position: Int): EngineRow = rows[position]
@@ -804,6 +826,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 is EngineRow.Header -> headerView(ctx, row.title)
                 is EngineRow.Option -> optionView(
                     ctx, row.title, row.subtitle, showRadio && row.value == current, showRadio,
+                    wrapSubtitle,
                 )
             }
     }
@@ -835,6 +858,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         subtitle: String,
         checked: Boolean,
         showRadio: Boolean,
+        wrapSubtitle: Boolean = false,
     ): View {
         val d = ctx.resources.displayMetrics.density
         val row = LinearLayout(ctx).apply {
@@ -869,8 +893,13 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 text = subtitle
                 textSize = 13f
                 alpha = 0.65f
-                maxLines = 1
-                ellipsize = TextUtils.TruncateAt.END
+                if (wrapSubtitle) {
+                    // 下载地址必须整条显示出来，不能被单行省略号截断。
+                    maxLines = 10
+                } else {
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                }
             },
         )
         row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -1010,20 +1039,33 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
 
     private fun formatMiB(bytes: Long): String = "%.1f MiB".format(bytes / 1048576.0)
 
-    /** 切换下载源；手动下载 / 复制地址收进本弹窗，避免顶层再挂一个重复入口。 */
+    /**
+     * 切换下载源：每个源都把完整地址显示出来（以体积最小的模型为例）。
+     * 只用 setAdapter + Header 行，不再 setMessage：之前两者同用会把地址列表挤出可视区。
+     */
     private fun showSourceDialog(ctx: Context) {
         val original = LocalVoiceSettings.downloadSource(ctx)
+        val sample = ModelCatalog.VARIANTS.minByOrNull { it.downloadMiB } ?: return
+        val rows = mutableListOf<EngineRow>()
+        rows += EngineRow.Header(
+            "点选即切换下载源。下面以 ${sample.zipName} 为例，列出每个源的完整地址；\n" +
+                "「模型地址」里可查看并复制所选模型的全部下载地址。",
+        )
+        ModelCatalog.sourceExamples(sample).forEachIndexed { index, (name, url) ->
+            rows += EngineRow.Option(index.toString(), name, url)
+        }
         AlertDialog.Builder(ctx)
             .setTitle(getString(R.string.local_asr_source))
-            .setMessage("点选即切换下载源；「模型地址」里可点某个源直接复制该源地址。")
-            .setSingleChoiceItems(ModelCatalog.SOURCES.toTypedArray(), original) { _, which ->
-                LocalVoiceSettings.setDownloadSource(ctx, which)
+            .setAdapter(
+                engineAdapter(ctx, rows, original.toString(), showRadio = true, wrapSubtitle = true),
+            ) { dialog, which ->
+                val row = rows.getOrNull(which) as? EngineRow.Option ?: return@setAdapter
+                LocalVoiceSettings.setDownloadSource(ctx, row.value.toInt())
+                dialog.dismiss()
+                refresh(ctx)
             }
             .setPositiveButton(android.R.string.ok) { _, _ -> refresh(ctx) }
-            .setNeutralButton("模型地址") { _, _ ->
-                refresh(ctx)
-                showManualDownload(ctx)
-            }
+            .setNeutralButton("模型地址") { _, _ -> showManualDownload(ctx) }
             .setNegativeButton(android.R.string.cancel) { _, _ ->
                 LocalVoiceSettings.setDownloadSource(ctx, original)
                 refresh(ctx)
@@ -1043,24 +1085,32 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             .show()
     }
 
-    /** 点哪个源就复制哪个源的完整地址，不再需要「复制当前源 / 复制官方」两个按钮。 */
+    /**
+     * 显示全部下载源的完整地址，点哪个源就复制哪个源的地址。
+     * 说明文字作为列表第一行 Header，整条 URL 允许多行显示，不再被单行省略号截断。
+     */
     private fun showDownloadUrls(ctx: Context, variant: ModelVariant) {
         val source = LocalVoiceSettings.downloadSource(ctx)
         val sources = ModelCatalog.sourceUrls(variant)
-        val message = buildString {
-            appendLine(variant.displayName)
-            appendLine("文件名：${variant.zipName}")
-            appendLine("大小：约 ${variant.downloadMiB} MiB")
-            appendLine("当前下载源：${ModelCatalog.SOURCES[source]}")
-            appendLine()
-            appendLine("点击下面的下载源即复制该源地址。下载好 ZIP 后，用「从本地导入模型（ZIP）」安装。")
-        }
-        val rows = sources.map { (label, url) -> EngineRow.Option(url, label, url) }
+        val rows = mutableListOf<EngineRow>()
+        rows += EngineRow.Header(
+            buildString {
+                appendLine(variant.displayName)
+                appendLine("文件名：${variant.zipName}")
+                appendLine("大小：约 ${variant.downloadMiB} MiB")
+                appendLine("当前下载源：${ModelCatalog.SOURCES[source]}")
+                appendLine()
+                appendLine("下面是全部 ${sources.size} 个下载源的完整地址（自动模式会依次尝试）。")
+                appendLine("点某个源即复制该源地址；下载好 ZIP 后，用「从本地导入模型（ZIP）」安装。")
+            }.trimEnd(),
+        )
+        sources.forEach { (label, url) -> rows += EngineRow.Option(url, label, url) }
         AlertDialog.Builder(ctx)
-            .setTitle("模型下载地址 · 点击源即复制")
-            .setMessage(message)
-            .setAdapter(engineAdapter(ctx, rows, current = "", showRadio = false)) { dialog, which ->
-                val row = rows.getOrNull(which) ?: return@setAdapter
+            .setTitle("模型下载地址 · 全部 ${sources.size} 个源")
+            .setAdapter(
+                engineAdapter(ctx, rows, current = "", showRadio = false, wrapSubtitle = true),
+            ) { dialog, which ->
+                val row = rows.getOrNull(which) as? EngineRow.Option ?: return@setAdapter
                 dialog.dismiss()
                 copyUrl(ctx, row.value)
             }
@@ -1258,7 +1308,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         val threads = LocalVoiceSettings.threads(ctx, family).toString()
         threadsPreference?.apply {
             value = if (threads in THREAD_VALUES) threads else "2"
-            summary = "当前：$value 线程 · ${getString(R.string.local_asr_threads_summary)}"
+            summary = "当前：$value 线程"
         }
         // 只有这两个家族的 sherpa-onnx 配置类带 language 字段；其余隐藏，避免给出无效选项。
         val supportsLanguage = family in LANGUAGE_FAMILIES
@@ -1278,7 +1328,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         conversionPreference?.apply {
             value = conversion
             val label = CONVERSION_SHORT[CONVERSION_VALUES.indexOf(conversion).coerceAtLeast(0)]
-            summary = "当前：$label\n仅影响语音上屏文字，打字不受影响"
+            summary = "当前：$label"
         }
         val translateOn = LocalVoiceSettings.isTranslateEnabled(ctx)
         translatePreference?.isChecked = translateOn
@@ -1295,7 +1345,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     "当前设备不支持（需 Android 9+ / arm64）"
                 } else {
                     val n = OfflineTranslator.pairsFor(LocalVoiceSettings.translateDirection(ctx)).size
-                    "当前方向需要 $n 套语言包 · 点击下载 / 删除 / 查看状态"
+                    "当前方向需要 $n 套语言包"
                 }
         }
         powerSavePreference?.isChecked = LocalVoiceSettings.isPowerSave(ctx)
@@ -1313,56 +1363,54 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         }
 
         val source = LocalVoiceSettings.downloadSource(ctx)
-        sourcePreference?.summary = "当前：${ModelCatalog.SOURCES[source]}\n点击切换下载源 / 复制某个源地址"
+        sourcePreference?.summary = "当前：${ModelCatalog.SOURCES[source]}"
 
         val present = ModelInstaller.installedModels(ctx)
         modelsPreference?.apply {
-            title = "下载并安装模型 / 本地语音包"
+            title = "下载并安装模型"
             summary = if (present.isEmpty()) {
-                "本地暂无语音包 · 可下载 ${ModelCatalog.VARIANTS.size} 种 · 点击打开选择列表"
+                "本地暂无语音包 · 可下载 ${ModelCatalog.VARIANTS.size} 种"
             } else {
                 "本地语音包 ${present.size} 套（占用 ${formatMiB(present.sumOf { it.sizeBytes })}）· " +
-                    "可下载 ${ModelCatalog.VARIANTS.size} 种 · 点击查看 / 下载 / 切换"
+                    "可下载 ${ModelCatalog.VARIANTS.size} 种"
             }
         }
         deletePreference?.summary = if (present.isEmpty()) {
-            "暂无已安装的模型 · 可清理下载缓存"
+            "暂无已安装的模型"
         } else {
-            "已安装 ${present.size} 套 · 占用 ${formatMiB(present.sumOf { it.sizeBytes })} · 点击选择并删除"
+            "已安装 ${present.size} 套 · 占用 ${formatMiB(present.sumOf { it.sizeBytes })}"
         }
         // 切换引擎 / 线程数 / 删除模型都会卸载识别器；从设置页返回时键盘常常已经弹着，
         // 不会再触发 onStartInputView，这里主动补一次后台预热，避免首次按语音键冷加载。
         VoiceLifecycle.warmUp(ctx.applicationContext)
     }
 
-    /** 设置项摘要直接显示当前引擎与模型，避免列表弹窗关闭后看不出选了什么。 */
+    /** 只显示已检测到的模型名称；没有可用模型时显示「当前：空」。 */
     private fun buildEngineSummary(ctx: Context, family: String): String {
-        val familyLabel = VoiceModels.family(family)?.label?.substringBefore("（") ?: family
         val key = LocalVoiceSettings.selectedVariant(ctx, family)
         val variant = ModelCatalog.VARIANTS.firstOrNull { it.familyId == family && it.key == key }
-        val current = when {
-            variant != null -> "$familyLabel · ${variant.label}" +
-                if (ModelInstaller.isInstalled(ctx, variant)) "（已安装）" else "（未安装）"
-            key.isNotBlank() -> "$familyLabel · 本地语音包 $key"
-            else -> "$familyLabel · 自动选择"
+        val localSelected = localPackages(ctx).firstOrNull { it.familyId == family && it.key == key }
+        val name = when {
+            variant != null && ModelInstaller.isInstalled(ctx, variant) -> variant.displayName
+            key.isNotBlank() && localSelected != null -> localSelected.label
+            else -> ""
         }
-        return "当前：$current\n点击选择已安装的语音模型"
+        return if (name.isBlank()) "当前：空" else "当前：$name"
     }
 
-    /** 列表里只留两行状态；完整路径与缺件说明放到详情弹窗。 */
+    /** 状态项只给结论：没模型就一句话，检测到才出现模型名称；完整信息仍在详情弹窗。 */
     private fun buildModelSummary(ctx: Context): String {
         val familyId = LocalVoiceSettings.vendor(ctx)
-        val family = VoiceModels.family(familyId) ?: VoiceModels.FAMILIES.first()
         val status = runCatching { VoiceModels.status(ctx, familyId) }.getOrNull()
             ?: return getString(R.string.local_asr_model_unknown)
-        val shortFamily = family.label.substringBefore("（")
-        return if (status.ready) {
-            val dir = status.resolved?.dir?.let { displayPath(ctx, it.absolutePath) }
-                ?: getString(R.string.local_asr_model_ready)
-            "已就绪 · $shortFamily\n$dir · 点击查看详情"
-        } else {
-            "未检测到完整模型 · $shortFamily\n点击一键下载推荐模型"
-        }
+        val dir = status.resolved?.dir ?: return "未检测到完整模型"
+        val name =
+            ModelCatalog.VARIANTS
+                .firstOrNull { it.familyId == familyId && ModelInstaller.installedDir(ctx, it) == dir }
+                ?.displayName
+                ?: ModelInstaller.installedModels(ctx).firstOrNull { it.dir == dir }?.label
+                ?: dir.name
+        return "已检测到：$name"
     }
 
     /** 咩版式说明分层：完整模型信息（目录、缺件、官方包名）只在点击后展示。 */
