@@ -1198,6 +1198,9 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 val active: () -> Boolean = { isActive }
                 val dir = installBlock(active) { phase, percent, note ->
                     withContext(Dispatchers.Main) {
+                        // 安装过程中用户可能已返回（Fragment 已 detach），此时取字符串会抛
+                        // "not attached to a context"。先确认仍附加再更新进度，否则直接跳过。
+                        if (!isAdded) return@withContext
                         val pct = percent.coerceIn(0, 100)
                         progress.progress = pct
                         detail.text = getString(R.string.local_asr_progress, phase, pct, note)
@@ -1215,7 +1218,10 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                         .show()
                 }
             } catch (_: CancellationException) {
-                main.post { toast(ctx, getString(R.string.local_asr_install_cancelled)) }
+                // 安装被取消（用户返回或点「取消」）时协程已脱离生命周期，此处必须用捕获的
+                // ctx 取字符串，不能直接调 this.getString()，否则已 detach 的 Fragment 会抛
+                // "not attached to a context" 直接崩进程。
+                main.post { toast(ctx, ctx.getString(R.string.local_asr_install_cancelled)) }
             } catch (t: Throwable) {
                 withContext(Dispatchers.Main) {
                     val root = VoiceModels.primaryRoot(ctx).absolutePath
@@ -1292,6 +1298,9 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     }
 
     private fun refresh(ctx: Context) {
+        // 后台协程（翻译包下载/删除等）也可能在 Fragment 已 detach 后回调到这里，
+        // 此时 this.getString() 会抛 "not attached to a context"。未附加时直接跳过整页刷新。
+        if (!isAdded) return
         val granted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
         permissionPreference?.summary = if (granted) {
