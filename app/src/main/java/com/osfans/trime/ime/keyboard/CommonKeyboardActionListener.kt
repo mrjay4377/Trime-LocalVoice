@@ -71,6 +71,7 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
             // 候选栏只负责录音波形；流式中间文字由控制器直接写进目标输入框。
             onRecordingChanged = { active -> inputBarDelegate.setVoiceRecording(active) }
             onLevelChanged = { level -> inputBarDelegate.setVoiceLevel(level) }
+            onRecognizingChanged = { recognizing -> inputBarDelegate.setVoiceRecognizing(recognizing) }
         }
     }
 
@@ -144,9 +145,12 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
                 }
             }
 
-            /** 松手结束录音并触发离线识别（长按空格、专用语音键都走这里）。 */
+            /** 松手结束录音并触发离线识别（长按空格、专用语音键都走这里）。识别中再松手则取消。 */
             override fun onRelease(keyEventCode: Int) {
-                if (voiceController.isActive) voiceController.finish()
+                if (voiceController.isActive) {
+                    if (voiceController.isRecognizing) voiceController.cancel()
+                    else voiceController.finish()
+                }
             }
 
             /** 滑出按键 / 触摸被系统打断时放弃本次录音，不上屏。 */
@@ -200,8 +204,11 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
                 }
                 // 正常路径已在录音（onPress 先开始），这里不重复开始；
                 // 只有从没有松手回调的入口（如工具栏动作）再次触发且已录超过 1 秒才手动结束。
+                // 识别中再次触发则取消本次识别。
                 if (voiceController.isActive) {
-                    if (SystemClock.elapsedRealtime() - voiceStartedAt > 1000L) {
+                    if (voiceController.isRecognizing) {
+                        voiceController.cancel()
+                    } else if (SystemClock.elapsedRealtime() - voiceStartedAt > 1000L) {
                         voiceController.finish()
                     }
                     return

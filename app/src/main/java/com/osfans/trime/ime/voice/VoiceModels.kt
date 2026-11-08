@@ -7,6 +7,7 @@
 package com.osfans.trime.ime.voice
 
 import android.content.Context
+import android.os.Build
 import android.os.Environment
 import com.osfans.trime.core.data.DataManager
 import com.osfans.trime.core.data.UserDataManager
@@ -139,15 +140,27 @@ object VoiceModels {
 
     fun family(id: String): VoiceFamily? = FAMILIES.firstOrNull { it.id == id }
 
-    /** 所有可能的 voice 目录；第一个是主目录（用于创建与展示）。 */
+    /**
+     * 是否已获得「所有文件访问权限」：Android 11+ 分区存储下，只有持此权限，
+     * 应用才能用 File / native 的 fopen 直接读写使用者资料夹（SAF 还原出的真实路径）。
+     * Android 10 及以下不需要此权限，File 直写公共目录本就允许。
+     */
+    fun hasAllFilesAccess(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
+
+    /**
+     * 所有可能的 voice 目录；第一个是主目录（用于创建、安装与识别）。
+     *
+     * 若已开启「模型存放用户目录」且持有所有文件权限，首选使用者资料夹下的 voice/：
+     * 它会被还原成真实文件路径，sherpa-onnx native 按路径 fopen 直接读取，无需复制进私有目录。
+     * 否则回退到应用私有目录（Android/data/<包名>/files/rime/voice），native 同样可直读。
+     */
     @Suppress("DEPRECATION")
     private fun candidateRoots(context: Context): List<File> {
         val roots = mutableListOf<File>()
-        // 首选：使用者资料夹 / voice。默认资料夹模式就是 EXTERNAL_SYNC，用户自己选的 rime
-        // 目录多半是 SAF（content://），而 sherpa-onnx 是 native 库、只能按真实路径打开模型，
-        // 所以先把它还原成文件路径并确认可写；不可用则静默回退到应用私有目录。
-        externalVoiceRoot()?.let { roots += it }
-        // 以下为回退与旧版兼容：v42 之前模型固定在应用私有目录，仍要能扫描到旧模型。
+        // 首选：使用者资料夹 / voice（需所有文件权限 + 已选资料夹 + 可写探测通过）。
+        externalVoiceRoot(context)?.let { roots += it }
+        // 回退与兼容：应用私有外部目录，native 可直读。
         runCatching { roots += File(DataManager.userDataDir, DIR_NAME) }
         runCatching { roots += File(UserDataManager.userDataDir, DIR_NAME) }
         context.getExternalFilesDir(null)?.let { roots += File(it, DIR_NAME) }
@@ -170,29 +183,24 @@ object VoiceModels {
             }
         }.getOrDefault(false)
 
-    @Volatile private var writableRootPath: String? = null
-
-    @Volatile private var writableRootOk = false
-
-    /** 使用者资料夹 / voice；资料夹不可用、无法解析或不可写时返回 null。 */
-    private fun externalVoiceRoot(): File? {
-        val base = runCatching { UserDataManager.externalRimeDirAsFile() }.getOrNull() ?: return null
+    /** 使用者资料夹 / voice；未开启、未授权、未选资料夹或不可写时返回 null。 */
+    private fun externalVoiceRoot(context: Context): File? {
+        if (!LocalVoiceSettings.useUserDataDir(context)) return null
+        if (!hasAllFilesAccess()) return null
+        val base = UserDataManager.externalRimeDirAsFile() ?: return null
         val voice = File(base, DIR_NAME)
-        val path = voice.absolutePath
-        val ok =
-            if (writableRootPath == path) {
-                writableRootOk
-            } else {
-                val probed = probeWritable(voice)
-                writableRootPath = path
-                writableRootOk = probed
-                probed
-            }
-        return if (ok) voice else null
+        return if (probeWritable(voice)) voice else null
     }
 
-    /** 当前 voice 是否真的落在「使用者资料夹」下；false 表示已回退到应用私有目录。 */
-    fun isUsingUserDataFolder(): Boolean = externalVoiceRoot() != null
+    /** 主目录是否落在「使用者资料夹」下；用于设置页提示当前模型位置。 */
+    fun isUsingUserDataFolder(context: Context): Boolean = externalVoiceRoot(context) != null
+
+    /**
+     * 是否已配置并授权「使用者资料夹」，用于「导出模型到使用者目录」的可用性判断。
+     * 注意：这仅决定能否导出备份，识别始终使用应用私有目录里的模型。
+     */
+    fun canExportToUserDataFolder(): Boolean =
+        runCatching { UserDataManager.hasExternalAccess() }.getOrDefault(false)
 
     /** 所有可扫描的 voice 目录（含旧版私有目录），供模型列表与删除使用。 */
     fun roots(context: Context): List<File> = candidateRoots(context)
@@ -234,10 +242,12 @@ object VoiceModels {
         appendLine("流式 Transducer 模型（含 encoder/decoder/joiner/tokens）放到 voice/streaming_xasr/ 下；")
         appendLine("流式 Paraformer 模型（含 encoder/decoder/tokens）放到 voice/streaming_paraformer/ 下。")
         appendLine()
-        appendLine("注意：本 voice 目录默认跟随「使用者资料夹 / 数据位置」，即你所选 rime 目录下的 voice/，")
-        appendLine("备份或迁移方案时模型可以一起带走。若该目录无法被还原成可读写的真实路径，")
-        appendLine("会自动回退到应用私有目录 Android/data/<包名>/files/rime/voice（旧版位置仍可扫描到模型）。")
-        appendLine("两种位置都不参与资料夹与 WebDAV 同步（模型体积大，避免部署时被反复哈希、复制或误删）。")
+        appendLine("注意：本 voice 目录固定在应用私有目录 Android/data/<包名>/files/rime/voice。")
+        appendLine("识别引擎是 native 库，只能按真实文件路径打开模型；而使用者资料夹是 SAF 授权目录，")
+        appendLine("Android 11+ 下 native / File 无法直接读写，所以模型不能直接放在使用者资料夹里。")
+        appendLine("如需备份或换机迁移，请在「设置 → 本地语音识别 → 模型」点「导出模型到使用者目录」，")
+        appendLine("应用会用 SAF 把模型复制到所选的 rime/voice/ 下（识别仍使用私有目录里这一份）。")
+        appendLine("voice 不参与资料夹与 WebDAV 同步（模型体积大，避免部署时被反复哈希、复制或误删）。")
         appendLine()
         appendLine("模型来源：https://github.com/k2-fsa/sherpa-onnx/releases （或 BiBi-Keyboard models release）")
         appendLine("录音格式：16kHz / 单声道 / 16bit PCM；本应用只在设备本地推理，不上传音频。")

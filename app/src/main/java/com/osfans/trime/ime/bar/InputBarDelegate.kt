@@ -193,6 +193,7 @@ class InputBarDelegate(override val di: DI) :
     private val voicePageIndex = 3
 
     private var voiceRecording = false
+    private var voiceRecognizing = false
     private var savedBarVisibility = View.VISIBLE
 
     private val barStateMachine =
@@ -245,8 +246,9 @@ class InputBarDelegate(override val di: DI) :
     }
 
     private fun switchUiByState(state: QuickBarStateMachine.State) {
-        // 录音期间锁定在语音标注页，候选更新不能把它顶掉。
-        if (voiceRecording) return
+        // 录音或「识别中」期间都锁定在语音标注页，候选更新不能把它顶掉；
+        // 否则松手进入识别中后，候选栏刷新会把「识别中…」提示页抢走。
+        if (voiceRecording || voiceRecognizing) return
         val index = state.ordinal
         if (view.displayedChild == index) return
         val new = view.getChildAt(index)
@@ -287,20 +289,39 @@ class InputBarDelegate(override val di: DI) :
     /**
      * 切换候选栏的「正在录音」标注页。由 CommonKeyboardActionListener 在按下/松手语音键时调用，
      * 状态机在录音期间被锁定，结束时按真实状态恢复候选栏。
+     * 录音态与「识别中」态独立：松手进入识别中后页面仍可见，直到结果返回才收起。
      */
     fun setVoiceRecording(active: Boolean) {
         if (voiceRecording == active) return
-        if (active) {
-            savedBarVisibility = view.visibility
-            voiceRecording = true
-            view.visibility = View.VISIBLE
-            view.displayedChild = voicePageIndex
+        voiceRecording = active
+        if (!voiceRecording) voiceUi.updateLevel(0f)
+        updateVoicePage()
+    }
+
+    /** 识别中：保持语音页可见并常驻显示「识别中…」；结束后由控制器取消。 */
+    fun setVoiceRecognizing(recognizing: Boolean) {
+        if (voiceRecognizing == recognizing) return
+        voiceRecognizing = recognizing
+        if (recognizing && !voiceRecording) voiceUi.updatePartial("识别中…")
+        updateVoicePage()
+    }
+
+    /** 录音态或识别中态任一为真时展示语音标注页；两者皆否时恢复候选栏。 */
+    private fun updateVoicePage() {
+        val show = voiceRecording || voiceRecognizing
+        if (show) {
+            if (view.displayedChild != voicePageIndex || view.visibility != View.VISIBLE) {
+                savedBarVisibility = view.visibility
+                view.visibility = View.VISIBLE
+                view.displayedChild = voicePageIndex
+            }
+            voiceUi.setActive(voiceRecording || voiceRecognizing)
         } else {
-            voiceRecording = false
+            voiceUi.setActive(false)
+            voiceUi.updatePartial("")
             switchUiByState(barStateMachine.currentState)
             view.visibility = savedBarVisibility
         }
-        voiceUi.setActive(active)
     }
 
     /** 录音实时音量：驱动语音标注两侧的波形起伏。 */

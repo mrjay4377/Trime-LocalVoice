@@ -20,6 +20,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
@@ -50,6 +51,7 @@ import com.osfans.trime.ime.voice.ModelInstaller
 import com.osfans.trime.ime.voice.ModelVariant
 import com.osfans.trime.ime.voice.OfflineTranslator
 import com.osfans.trime.ime.voice.VoiceLifecycle
+import com.osfans.trime.core.data.UserDataManager
 import com.osfans.trime.ime.voice.VoiceModels
 import com.osfans.trime.ui.common.PaddingPreferenceFragment
 import io.github.yinvoker.foxlet.LanguagePair
@@ -87,6 +89,8 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     private var unloadDelayPreference: ListPreference? = null
     private var modelsPreference: Preference? = null
     private var deletePreference: Preference? = null
+    private var userDirPreference: SwitchPreferenceCompat? = null
+    private var migratePreference: Preference? = null
     private var installJob: Job? = null
     private var progressDialog: AlertDialog? = null
 
@@ -98,6 +102,13 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             startImport(ctx, uri, queryDisplayName(ctx, uri))
         }
 
+    /** 引导去系统设置授予「所有文件访问权限」，之后模型可直接放在使用者资料夹并被 native 读取。 */
+    private val allFilesLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            // 返回后刷新：若已授权且选了资料夹，用户目录即生效
+            context?.let(::refresh)
+        }
+
     override fun onCreatePreferences(
         savedInstanceState: Bundle?,
         rootKey: String?,
@@ -107,7 +118,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         ModelInstaller.writeInstalledIndex(ctx)
 
         preferenceScreen = preferenceManager.createPreferenceScreen(ctx).apply {
-            // 参照咩版：先给状态，再分组配置；每项摘要只留当前值，长说明放进点击后的弹窗。
+            // 参照咩版「识别服务与模型」页：先状态，再「语音输入」开关组，再「模型」组，最后识别选项。
             addPreference(category(ctx, KEY_CATEGORY_STATUS, "当前状态"))
 
             addPreference(
@@ -123,7 +134,6 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                         if (status?.ready == true) {
                             showModelDetail(ctx)
                         } else {
-                            // 还没有可用模型时，直接给出一键下载入口，避免只显示路径却无从下手。
                             val recommended = ModelCatalog.VARIANTS.minByOrNull { it.downloadMiB }
                             if (recommended != null) {
                                 confirmDownload(ctx, recommended) { refresh(ctx) }
@@ -131,6 +141,22 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                                 showModelList(ctx)
                             }
                         }
+                        true
+                    }
+                },
+            )
+
+            addPreference(category(ctx, KEY_CATEGORY_BASIC, "语音输入"))
+
+            addPreference(
+                SwitchPreferenceCompat(ctx).apply {
+                    key = KEY_ENABLED
+                    title = getString(R.string.local_asr_enabled)
+                    summary = getString(R.string.local_asr_enabled_summary)
+                    isIconSpaceReserved = false
+                    isChecked = LocalVoiceSettings.isEnabled(ctx)
+                    setOnPreferenceChangeListener { _, newValue ->
+                        LocalVoiceSettings.setEnabled(ctx, newValue as Boolean)
                         true
                     }
                 },
@@ -153,21 +179,33 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 },
             )
 
-            addPreference(category(ctx, KEY_CATEGORY_BASIC, "基本设置"))
-
             addPreference(
                 SwitchPreferenceCompat(ctx).apply {
-                    key = KEY_ENABLED
-                    title = getString(R.string.local_asr_enabled)
-                    summary = getString(R.string.local_asr_enabled_summary)
+                    key = KEY_USER_DIR
+                    title = "模型存放位置：用户目录"
+                    summary = "默认跟随使用者资料夹，native 可直接读取；关闭则固定应用私有目录"
                     isIconSpaceReserved = false
-                    isChecked = LocalVoiceSettings.isEnabled(ctx)
+                    isChecked = LocalVoiceSettings.useUserDataDir(ctx)
+                    userDirPreference = this
                     setOnPreferenceChangeListener { _, newValue ->
-                        LocalVoiceSettings.setEnabled(ctx, newValue as Boolean)
+                        val on = newValue as Boolean
+                        LocalVoiceSettings.setUseUserDataDir(ctx, on)
+                        // 开启但还没「所有文件访问权限」时，引导去系统设置授权（Android 11+ 必需）。
+                        if (on && !VoiceModels.hasAllFilesAccess()) {
+                            runCatching {
+                                allFilesLauncher.launch(
+                                    Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                                        .setData(Uri.fromParts("package", ctx.packageName, null)),
+                                )
+                            }
+                        }
+                        refresh(ctx)
                         true
                     }
                 },
             )
+
+            addPreference(category(ctx, KEY_CATEGORY_MODELS, "识别服务与模型"))
 
             addPreference(
                 Preference(ctx).apply {
@@ -208,6 +246,35 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     setOnPreferenceClickListener {
                         // 部分文件管理器给 zip 的 MIME 是 octet-stream，用 */* 保证能选到。
                         openZipLauncher.launch(arrayOf("*/*"))
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                Preference(ctx).apply {
+                    key = KEY_EXPORT_MODELS
+                    title = getString(R.string.local_asr_export_models)
+                    summary = getString(R.string.local_asr_export_models_summary)
+                    isIconSpaceReserved = false
+                    isSelectable = true
+                    setOnPreferenceClickListener {
+                        showExportModels(ctx)
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                Preference(ctx).apply {
+                    key = KEY_MIGRATE
+                    title = "迁移已有模型到用户目录"
+                    summary = "把应用私有目录里的旧模型复制到使用者资料夹（需所有文件权限）"
+                    isIconSpaceReserved = false
+                    isSelectable = true
+                    migratePreference = this
+                    setOnPreferenceClickListener {
+                        showMigrate(ctx)
                         true
                     }
                 },
@@ -950,6 +1017,57 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     }
 
     /**
+     * 手动导出：把应用私有目录里的模型用 SAF 复制一份到「使用者资料夹 / voice」。
+     * 识别始终使用私有目录里的那一份，这份副本只用于备份 / 换机迁移 / 文件管理器查看。
+     */
+    private fun showExportModels(ctx: Context) {
+        if (!VoiceModels.canExportToUserDataFolder()) {
+            toast(ctx, getString(R.string.local_asr_export_no_external))
+            return
+        }
+        val models = ModelInstaller.installedModels(ctx).filterNot { it.dir.name.startsWith(".") }
+        if (models.isEmpty()) {
+            toast(ctx, getString(R.string.local_asr_export_no_models))
+            return
+        }
+        val labels = models.map { "${it.label} · ${formatMiB(it.sizeBytes)}" }.toTypedArray()
+        AlertDialog.Builder(ctx)
+            .setTitle(R.string.local_asr_export_models)
+            .setMessage(R.string.local_asr_export_models_summary)
+            .setItems(labels) { _, which ->
+                models.getOrNull(which)?.let { runExport(ctx, it) }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** 导出进度对话框 + IO 线程 + 异常兜底，避免复制几百 MB 时卡住主线程。 */
+    private fun runExport(ctx: Context, model: InstalledModel) {
+        val dialog = AlertDialog.Builder(ctx)
+            .setTitle(R.string.local_asr_export_models)
+            .setMessage("正在复制 ${model.label}（${formatMiB(model.sizeBytes)}）到使用者目录，请稍候…")
+            .setCancelable(false)
+            .show()
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val copied = withContext(Dispatchers.IO) {
+                    ModelInstaller.exportToExternal(ctx.applicationContext, model)
+                }
+                toast(ctx, getString(R.string.local_asr_export_success, formatMiB(copied)))
+            } catch (t: CancellationException) {
+                throw t
+            } catch (t: Throwable) {
+                toast(
+                    ctx,
+                    getString(R.string.local_asr_export_failed, t.message ?: t.javaClass.simpleName),
+                )
+            } finally {
+                runCatching { dialog.dismiss() }
+            }
+        }
+    }
+
+    /**
      * 统一管理入口：列出 voice 目录里所有真实存在的模型（含 ZIP 导入、手动放置、
      * 安装失败残留），支持多选删除；另外可单独清理未完成的下载缓存。
      */
@@ -982,6 +1100,58 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    /**
+     * 迁移已有模型到使用者资料夹：仅在「模型存放位置：用户目录」已开启、且持有所有文件权限、
+     * 并已选择使用者资料夹时可用。把此前装在应用私有目录的旧模型复制到使用者资料夹。
+     */
+    private fun showMigrate(ctx: Context) {
+        if (!LocalVoiceSettings.useUserDataDir(ctx) || !VoiceModels.hasAllFilesAccess() ||
+            UserDataManager.externalRimeDirAsFile() == null
+        ) {
+            toast(ctx, "请先在「模型存放位置：用户目录」开启并授予「所有文件访问权限」、选择使用者资料夹")
+            return
+        }
+        val primary = VoiceModels.primaryRoot(ctx).absolutePath
+        val toMove = ModelInstaller.installedModels(ctx).filter { it.dir.absolutePath != primary }
+        if (toMove.isEmpty()) {
+            toast(ctx, "没有需要迁移的模型（已在使用者资料夹）")
+            return
+        }
+        AlertDialog.Builder(ctx)
+            .setTitle("迁移已有模型到用户目录")
+            .setMessage(
+                "将把 ${toMove.size} 套模型（约 ${formatMiB(toMove.sumOf { it.sizeBytes })}）" +
+                    "复制到使用者资料夹 / voice 下，便于文件管理器访问与换机迁移。\n" +
+                    "复制后识别优先使用使用者资料夹里的模型。",
+            )
+            .setPositiveButton("开始迁移") { _, _ -> runMigrate(ctx, toMove) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun runMigrate(ctx: Context, models: List<InstalledModel>) {
+        val dialog = AlertDialog.Builder(ctx)
+            .setTitle("正在迁移模型")
+            .setMessage("正在复制模型到使用者资料夹，请稍候…")
+            .setCancelable(false)
+            .show()
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                var copied = 0L
+                for (m in models) {
+                    copied += runCatching { ModelInstaller.exportToExternal(ctx.applicationContext, m) }
+                        .getOrDefault(0L)
+                }
+                toast(ctx, "已迁移 ${formatMiB(copied)} 到使用者资料夹")
+            } catch (t: Throwable) {
+                toast(ctx, "迁移失败：${t.message ?: t.javaClass.simpleName}")
+            } finally {
+                runCatching { dialog.dismiss() }
+                if (isAdded) refresh(ctx)
+            }
+        }
     }
 
     private fun confirmDelete(ctx: Context, models: List<InstalledModel>) {
@@ -1374,6 +1544,36 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         val source = LocalVoiceSettings.downloadSource(ctx)
         sourcePreference?.summary = "当前：${ModelCatalog.SOURCES[source]}"
 
+        // 模型存放位置：综合「开关 + 所有文件权限 + 已选资料夹」展示当前真实落点。
+        userDirPreference?.apply {
+            isChecked = LocalVoiceSettings.useUserDataDir(ctx)
+            summary = when {
+                !LocalVoiceSettings.useUserDataDir(ctx) ->
+                    "当前：应用私有目录（Android/data/…/files/rime/voice）"
+                !VoiceModels.hasAllFilesAccess() ->
+                    "需先在系统设置授予「所有文件访问权限」后，模型才会放进使用者资料夹"
+                UserDataManager.externalRimeDirAsFile() == null ->
+                    "需先在「数据位置」选择使用者资料夹"
+                else ->
+                    "当前：使用者资料夹（${displayPath(ctx, VoiceModels.primaryRoot(ctx).absolutePath)}）"
+            }
+        }
+        // 只有真正能用用户目录时才允许迁移（否则复制到私有目录毫无意义）。
+        val canMigrate = LocalVoiceSettings.useUserDataDir(ctx) &&
+            VoiceModels.hasAllFilesAccess() && UserDataManager.externalRimeDirAsFile() != null
+        migratePreference?.apply {
+            isEnabled = canMigrate
+            val privateCount = ModelInstaller.installedModels(ctx)
+                .count { it.dir.absolutePath != VoiceModels.primaryRoot(ctx).absolutePath }
+            summary = if (!canMigrate) {
+                "请先在「模型存放位置」开启用户目录并授予所有文件权限"
+            } else if (privateCount == 0) {
+                "没有需要迁移的旧模型（已在使用者资料夹）"
+            } else {
+                "可迁移 $privateCount 套私有目录模型到使用者资料夹"
+            }
+        }
+
         val present = ModelInstaller.installedModels(ctx)
         modelsPreference?.apply {
             title = "下载并安装模型"
@@ -1431,10 +1631,10 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         val message = buildString {
             append(getString(R.string.local_asr_model_root, displayPath(ctx, root)))
             append(
-                if (VoiceModels.isUsingUserDataFolder()) {
-                    "\nvoice 跟随「使用者资料夹」，备份方案时可一并带走\n"
+                if (VoiceModels.canExportToUserDataFolder()) {
+                    "\n识别使用应用私有目录；已授权使用者资料夹，可在「模型」里导出备份\n"
                 } else {
-                    "\n使用者资料夹无法按真实路径读写，voice 已回退到应用私有目录\n"
+                    "\n识别使用应用私有目录；未选择使用者资料夹，暂不能导出备份\n"
                 },
             )
             val selected = LocalVoiceSettings.selectedVariant(ctx, familyId)
@@ -1470,6 +1670,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         const val KEY_CATEGORY_MODELS = "lv_category_models"
         const val KEY_MODELS = "lv_models"
         const val KEY_IMPORT_ZIP = "lv_import_zip"
+        const val KEY_EXPORT_MODELS = "lv_export_models"
         const val KEY_DELETE_MODELS = "lv_delete_models"
         const val KEY_SOURCE = "lv_source"
         const val KEY_CATEGORY_RECOG = "lv_category_recog"
@@ -1485,6 +1686,10 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         const val KEY_TRANSLATE_PACKS = "lv_translate_packs"
         const val KEY_SAVE_RECORDING = "lv_save_recording"
         const val KEY_USAGE = "lv_usage"
+        /** 模型存放位置：用户目录（使用者资料夹，native 可直接读取）。 */
+        const val KEY_USER_DIR = "lv_user_dir"
+        /** 迁移已有模型到用户目录。 */
+        const val KEY_MIGRATE = "lv_migrate"
         const val BIBI_REPO_URL = "https://github.com/BryceWG/BiBi-Keyboard"
         val THREAD_VALUES = arrayOf("1", "2", "3", "4", "6", "8")
         /** 空串 = 自动识别（与 LocalVoiceSettings.language 默认值、引擎 ifBlank{"auto"} 一致）。 */

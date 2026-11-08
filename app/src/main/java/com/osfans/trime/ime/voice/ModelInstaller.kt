@@ -11,6 +11,8 @@ package com.osfans.trime.ime.voice
 
 import android.content.Context
 import android.net.Uri
+import com.osfans.trime.core.data.UserDataManager
+import io.github.whiredplanck.storageaccess.StorageAccess
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -69,6 +71,8 @@ object ModelInstaller {
     const val PHASE_IMPORT = "导入本地模型"
     const val PHASE_READY = "完成"
 
+    private const val DEFAULT_MIME = "application/octet-stream"
+
     /** 安装后的目录：voice/<家族>/<变体>。 */
     fun installedDir(context: Context, variant: ModelVariant): File =
         File(File(VoiceModels.primaryRoot(context), variant.familyId), variant.key)
@@ -92,6 +96,83 @@ object ModelInstaller {
         val result = runCatching { !dir.exists() || dir.deleteRecursively() }.getOrDefault(false)
         writeInstalledIndex(context)
         return result
+    }
+
+    /**
+     * 把已安装模型通过 SAF 复制一份到「使用者资料夹 / voice」下，作为备份副本。
+     *
+     * 不能直接把模型装在使用者资料夹：sherpa-onnx 是 native 库，只能按真实路径 fopen
+     * 打开 onnx；SAF 授权的公共目录在 Android 11+ 下对 File/native 读写均被拒绝。
+     * 识别始终使用应用私有目录里的那一份，这里只额外复制到使用者资料夹，方便
+     * 文件管理器查看、备份或换机迁移。
+     *
+     * @return 实际复制的字节数
+     */
+    suspend fun exportToExternal(context: Context, model: InstalledModel): Long {
+        val app = context.applicationContext
+        val rootUri = UserDataManager.externalRimeDirUri()
+            ?: throw IOException("未选择使用者资料夹，请先在「设置 → 数据位置」里选择 rime 目录")
+        if (!UserDataManager.hasExternalAccess()) {
+            throw IOException("使用者资料夹没有读写权限，请重新选择并授权")
+        }
+        if (!model.dir.isDirectory) {
+            throw IOException("模型目录不存在：${model.dir.absolutePath}")
+        }
+        val primary = VoiceModels.primaryRoot(app)
+        // 模型可能不在主目录（如从应用私有目录迁移到使用者资料夹）：此时不能用 toRelativeString
+        // 还原相对路径（会得到完整绝对路径），直接以模型目录名作为子路径，避免嵌套出错误层级。
+        val rel = if (model.dir.absolutePath == primary.absolutePath ||
+            model.dir.absolutePath.startsWith(primary.absolutePath + File.separator)
+        ) {
+            model.dir.toRelativeString(primary).takeIf { it.isNotBlank() && it != "." } ?: ""
+        } else {
+            model.dir.name
+        }
+        val base = buildList {
+            add(VoiceModels.DIR_NAME)
+            if (rel.isNotBlank()) addAll(rel.split('/').filter { it.isNotBlank() })
+        }
+        var copied = 0L
+        withContext(Dispatchers.IO) {
+            model.dir.walkTopDown().forEach { file ->
+                if (!file.isFile) return@forEach
+                val relFile = file.toRelativeString(model.dir)
+                val segments = base + relFile.split('/').filter { it.isNotBlank() }
+                val parentUri = if (segments.size > 1) {
+                    StorageAccess.mkdirp(rootUri, *segments.dropLast(1).toTypedArray()).uri
+                } else {
+                    rootUri
+                }
+                StorageAccess.pasteLocalFile(
+                    file.path,
+                    parentUri,
+                    file.name,
+                    DEFAULT_MIME,
+                    overwrite = true,
+                )
+                copied += file.length()
+            }
+        }
+        Timber.i("Voice model exported to user folder: %s (%d bytes)", model.label, copied)
+        return copied
+    }
+
+    /**
+     * 迁移：把当前不在使用者资料夹里的已安装模型，通过 SAF 复制到使用者资料夹 / voice 下。
+     * 配合「模型存放位置：用户目录」使用——开启后新下载/导入的模型直接落使用者资料夹，
+     * 本方法把此前装在应用私有目录的旧模型也搬过去。已在使用者资料夹的模型会被跳过。
+     *
+     * @return 实际复制的字节数
+     */
+    suspend fun migrateToExternal(context: Context): Long {
+        val app = context.applicationContext
+        val primary = VoiceModels.primaryRoot(app).absolutePath
+        val toMove = installedModels(app).filter { it.dir.absolutePath != primary }
+        var total = 0L
+        for (model in toMove) {
+            total += runCatching { exportToExternal(app, model) }.getOrDefault(0L)
+        }
+        return total
     }
 
     /**
@@ -277,8 +358,9 @@ object ModelInstaller {
                 if (!imported) appendLine("（暂无本地导入的模型）")
                 appendLine()
                 appendLine("模型目录：${root.absolutePath}")
-                appendLine("默认跟随「使用者资料夹」；若这里显示 Android/data/<包名>/files/rime/voice，")
-                appendLine("表示资料夹无法按真实路径读写、已自动回退到应用私有目录（旧位置仍会扫描）。")
+                appendLine("识别引擎是 native 库，只能读应用私有目录里的模型，因此 voice 固定在这里。")
+                appendLine("如需备份或换机迁移，可在「设置 → 本地语音识别 → 模型」点「导出模型到使用者目录」，")
+                appendLine("应用会用 SAF 把模型复制到所选的 rime/voice/ 下（识别仍使用本目录）。")
                 appendLine("部分文件管理器无法直接浏览 Android/data，可用 adb 或在设置页复制路径查看。")
             }
             File(root, "installed.txt").writeText(text, Charsets.UTF_8)

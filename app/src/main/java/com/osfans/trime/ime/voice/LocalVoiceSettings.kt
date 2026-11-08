@@ -18,6 +18,15 @@ object LocalVoiceSettings {
     fun setEnabled(context: Context, value: Boolean) =
         prefs(context).edit().putBoolean("enabled", value).apply()
 
+    /**
+     * 模型存放位置：true = 优先放在使用者资料夹（需「所有文件访问权限」，native 才能 fopen 读取）；
+     * false = 强制应用私有目录。默认开，满足条件时自动生效，未授权或未选资料夹时自动回退私有目录。
+     */
+    fun useUserDataDir(context: Context): Boolean = prefs(context).getBoolean("use_user_data_dir", true)
+
+    fun setUseUserDataDir(context: Context, value: Boolean) =
+        prefs(context).edit().putBoolean("use_user_data_dir", value).apply()
+
     fun vendor(context: Context): String {
         val default = VoiceModels.FAMILIES.first().id
         val saved = prefs(context).getString("vendor", default) ?: default

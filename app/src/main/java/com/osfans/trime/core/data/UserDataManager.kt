@@ -165,6 +165,18 @@ object UserDataManager {
     }
 
     /**
+     * 「使用者资料夹」的 SAF tree Uri；未选择时返回 null。
+     *
+     * voice 模型导出备份必须走 SAF 写入（ContentResolver），不能用还原出来的 File 路径：
+     * Android 11+ 分区存储下，File/native 对公共目录的读写都会被拒绝，只有 SAF 有效。
+     */
+    fun externalRimeDirUri(): Uri? {
+        val raw = externalRimeTreeUri
+        if (raw.isEmpty()) return null
+        return runCatching { Uri.parse(raw) }.getOrNull()
+    }
+
+    /**
      * Bootstraps a usable schema list into the user data dir on first run, so a
      * freshly installed app has something to deploy.
      */

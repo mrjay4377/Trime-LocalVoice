@@ -426,3 +426,36 @@ v42 改动仍留在工作树未提交（最新提交仍是 `7f0f5c0b`）。
 > 注：`app/src/main/jni/boost` 目录由 `cmake/Boost.cmake` 从 `boost-1.92.0.tar.xz` 解压得来（68084 条目）；
 > Git Bash 的 `tar` 缺 `xz`、且 Windows MAX_PATH 会截断超长测试路径，已用 Python（`\\?\` 前缀）手动解压到 `jni/boost/`。
 > 该目录未入库、非构建必需缓存，合并上游或清理时勿误删。v43 改动同样未提交（最新提交仍 `7f0f5c0b`）。
+
+## v44：语音目录回归私有目录 + 手动导出备份（含安装取消崩溃修复）
+
+| 项目 | 改动 |
+| --- | --- |
+| 崩溃修复 | `LocalAsrSettingsFragment` 安装取消分支原用 `main.post { toast(ctx, getString(...)) }`，Fragment 已 detach 时 `this.getString()` → `requireContext()` 抛 `not attached to a context` 直接崩进程。改为 `ctx.getString(...)`；`onStage` 进度回调与 `refresh()` 入口加 `isAdded` 守卫。提交 `239c2c65` |
+| 目录结论 | v42 的「语音目录跟随使用者资料夹」在 Android 11+ 不可行：SAF 授权只对 `ContentResolver`/`DocumentFile` 生效，`java.io.File` 与 native `fopen` 读写公共目录会被 scoped storage 拒绝（本包 targetSdk=37）。v41 及更早语音一直固定在应用私有目录 `Android/data/<包名>/files/rime/voice`，所以「以前能用」= 私有目录能用 |
+| VoiceModels | 移除 `externalVoiceRoot()` / `probeWritable()` 首选逻辑，`primaryRoot` 固定为 `DataManager.userDataDir/voice`；`isUsingUserDataFolder()` 改为 `canExportToUserDataFolder()`（判断 `hasExternalAccess()`），仅用于导出入口可用性 |
+| UserDataManager | 新增 `externalRimeDirUri()` 暴露 SAF tree Uri（导出备份必须走 SAF 写，不能用还原的真实路径） |
+| ModelInstaller | 新增 `exportToExternal()`：递归用 `StorageAccess.mkdirp` + `pasteLocalFile` 把已安装模型复制到 `使用者目录/voice/<相对路径>/`，返回复制字节数 |
+| 设置页 | 「模型」分组新增「导出模型到使用者目录」入口；列出已安装模型，选中后进度对话框 + IO 协程复制；识别仍读私有目录 |
+| 文案 | `readmeText()` / `installed.txt` 说明改为「固定私有目录 + 手动导出备份」 |
+
+**交付**：`Trime-LocalVoice-v44-arm64-v8a.apk` = release（`-O3` + R8）经 `repack_apk.py` 重签，18,991,458 B，证书 `629c7023…`，无 debuggable，`targetSdk 37`，可覆盖 v43。
+
+> 构建注意：本次用默认 `~/.gradle`（含完整的 gradle-9.8.1 分发）；`gradle-cache/wrapper/dists` 下只有 4.5 MB 残缺 `.part`，设 `GRADLE_USER_HOME=gradle-cache` 会每次卡在下载 gradle。
+
+## v45：模型住用户目录（native 可直读）+ 识别中常驻 + 设置页重排（对齐咩版）
+
+| 项目 | 改动 |
+| --- | --- |
+| 需求背景 | 回归 / 对齐 trime-mie（咩版）：① 模型直接住使用者资料夹、sherpa-onnx native 按真实路径 `fopen` 直读；② 松手后保留语音态 + 常驻「识别中」提示，直到 `onFinal` 上屏才 `cleanup`，且识别过程中可取消；③ 设置页重排成咩版风格（状态 / 语音输入 / 模型 分区清晰） |
+| VoiceModels | 重新加入 `hasAllFilesAccess()`（`R` 以下或 `Environment.isExternalStorageManager()`）、`probeWritable()`、`externalVoiceRoot()`（开启用户目录 + 持有所有文件权限 + 已选资料夹 + 写探测通过才返回）、`isUsingUserDataFolder()`；`candidateRoots()` 首选 `externalVoiceRoot`，否则回退私有目录等旧逻辑 |
+| Manifest | 新增 `android.permission.MANAGE_EXTERNAL_STORAGE`（R+ 必需，native 才能按路径读写使用者资料夹） |
+| LocalVoiceSettings | 新增 `useUserDataDir`（默认 true，对应开关「模型存放位置：用户目录」） |
+| LocalVoiceController | 新增 `isRecognizing`（`finishing && !finished`）、`onRecognizingChanged`、`publishRecognizing()`；`finish()` 松手后 `publishRecording(false)` + `publishRecognizing(true)` 保留语音态（删原「正在本地识别」Toast）；`cleanup()` 增加 `publishRecognizing(false)`；`cancel()` 去掉「识别中不可取消」限制，识别中亦可中止 |
+| InputBarDelegate | `setVoiceRecording` 改为驱动 `updateVoicePage()`；新增 `setVoiceRecognizing()`（非录音时显示「识别中…」）、`updateVoicePage()`（录音或识别中任一为真则常驻语音页）；`switchUiByState` 守卫从仅 `voiceRecording` 扩展到 `voiceRecording || voiceRecognizing`，防止识别中被候选更新抢走页面 |
+| CommonKeyboardActionListener | 懒加载绑定 `onRecognizingChanged`；`onRelease` 区分 `isRecognizing`→`cancel()` / 否则 `finish()`；`handleLocalVoiceInput` 识别中再次触发走 `cancel()` |
+| 设置页 | `LocalAsrSettingsFragment` 重排为「当前状态 / 语音输入（启用 + 麦克风 + 模型存放位置：用户目录开关）/ 识别服务与模型 + 模型（下载/导入/导出/迁移/删除/清理）/ 识别选项」；用户目录开关开启且未授权时引导去 `Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION`；新增「迁移已有模型到用户目录」按钮（复制私有目录旧模型到使用者资料夹）；`refresh()` 展示当前落点与迁移可用性 |
+| ModelInstaller | `exportToExternal()` 修复相对路径（模型不在主目录时改用 `model.dir.name` 作为子路径）；新增 `migrateToExternal()` |
+
+**说明**：v44 的结论「SAF 授权无法让 native 直读用户目录」成立，但漏算了 `MANAGE_EXTERNAL_STORAGE` 这条路——持有该权限后 `File` / `fopen` 即可读写使用者资料夹。方案 B 即走此路；未授权 / 未选资料夹时自动回退私有目录，识别行为不变。
+

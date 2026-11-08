@@ -49,20 +49,38 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
 
     val isActive: Boolean get() = current != null
 
+    /** 是否正处于「松手后等待识别结果」阶段（此阶段仍可取消）。 */
+    val isRecognizing: Boolean
+        get() = current?.let { it.finishing && !it.finished } ?: false
+
     /** 录音状态（不含识别阶段）：驱动候选栏的语音标注显隐。回调在主线程执行。 */
     @Volatile
     private var recording = false
+
+    /** 「识别中」状态：松手后、结果返回前为 true；用于候选栏常驻「识别中」提示。 */
+    @Volatile
+    private var recognizing = false
 
     var onRecordingChanged: ((Boolean) -> Unit)? = null
 
     /** 实时音量（0..1），驱动候选栏两侧的波形起伏；回调在主线程执行。 */
     var onLevelChanged: ((Float) -> Unit)? = null
 
+    /** 进入/离开「识别中」状态（松手后、结果返回前）；回调在主线程执行。 */
+    var onRecognizingChanged: ((Boolean) -> Unit)? = null
+
     private fun publishRecording(active: Boolean) {
         if (recording == active) return
         recording = active
         if (!active) main.post { onLevelChanged?.invoke(0f) }
         main.post { onRecordingChanged?.invoke(active) }
+    }
+
+    /** 进入/离开「识别中」状态：驱动候选栏常驻「识别中」提示，直到结果返回才收起。 */
+    private fun publishRecognizing(active: Boolean) {
+        if (recognizing == active) return
+        recognizing = active
+        main.post { onRecognizingChanged?.invoke(active) }
     }
 
     /** 只保留一个 Toast：多条提示会排队显示，导致上屏文字后仍弹出旧的「正在录音」。 */
@@ -285,8 +303,9 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
         val session = current ?: return
         if (session.finishing || session.finished) return
         session.finishing = true
-        // 松手即收起标注，识别仍在后台继续。
+        // 松手后保留语音态并常驻「识别中」提示，直到 onFinal/onError 才 cleanup 退出。
         publishRecording(false)
+        publishRecognizing(true)
         session.watchdog?.cancel()
         scope.launch {
             session.recorder?.stopAndJoin()
@@ -299,11 +318,8 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
                 session.peakLevel,
             )
             if (current === session && !session.finished) {
-                // 流式引擎录音期间已实时出字，松手后几乎立即可上屏，不再闪一条提示；
-                // 离线整段推理可能要几十秒，仍需明确反馈避免看起来「松手没反应」。
-                if (!VoiceModels.isStreaming(session.familyId)) {
-                    notice("正在本地识别（%.1f 秒录音）…".format(session.seconds))
-                }
+                // 离线整段推理可能要几十秒：候选栏已常驻「识别中…」提示，不再额外弹 Toast，
+                // 避免和「识别中」提示排队、在文字上屏之后才冒出来。
                 withContext(Dispatchers.Main) {
                     if (current === session && !session.finished) session.engine?.stop()
                 }
@@ -322,12 +338,11 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
         }
     }
 
-    /** 放弃本次会话，不再上屏。 */
+    /** 放弃本次会话，不再上屏。录音中或识别中均可取消：直接中止引擎。 */
     fun cancel() {
         val session = current ?: return
-        // 松手后手势层可能补发 onCancel（重复按键任务结束、滑出按键等）。此时会话已进入
-        // 收尾/识别阶段，不能再清掉，否则 engine.stop() 不会执行，表现为「松手没有文字」。
-        if (session.finishing || session.finished) return
+        if (session.finished) return
+        // 识别阶段（finishing && !finished）同样允许取消：直接中止引擎，不再等待结果上屏。
         cleanup(session)
     }
 
@@ -338,6 +353,7 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
 
     private fun cleanup(session: Session) {
         publishRecording(false)
+        publishRecognizing(false)
         // 结果成功上屏后 voiceComposingActive 已置 false，这里只清理「取消 / 失败」残留的半句话。
         main.post { service.cancelVoiceComposing() }
         session.finished = true

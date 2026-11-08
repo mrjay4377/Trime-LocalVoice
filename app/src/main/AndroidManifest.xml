@@ -14,6 +14,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
     <!-- 本地语音输入：识别在设备本地进行；INTERNET 用于下载离线模型包与 WebDAV 同步 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 模型放「使用者资料夹」且让 native 直接读取，需要所有文件访问权限（Android 11+） -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <!-- WebDAV「仅 Wi-Fi 同步」需要读取当前网络类型 -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
