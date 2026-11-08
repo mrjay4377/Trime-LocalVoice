@@ -158,7 +158,9 @@ object UserDataManager {
     fun isStorageChoiceDone(): Boolean = when (dataStorageMode) {
         DataStorageMode.APP_STORAGE -> true
         DataStorageMode.EXTERNAL_SYNC -> externalRimeTreeUri.isNotEmpty()
-        DataStorageMode.EXTERNAL_DIRECT -> externalRimeTreeUri.isNotEmpty() && hasAllFilesAccess()
+        // EXTERNAL_DIRECT：选了资料夹即视为选择完成（向导可继续）；缺少「所有文件访问」
+        // 权限时 userDataDir 会自动回退私有目录，不在此卡住首次设置流程。
+        DataStorageMode.EXTERNAL_DIRECT -> externalRimeTreeUri.isNotEmpty()
     }
 
     /**

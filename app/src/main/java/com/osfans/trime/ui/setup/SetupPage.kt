@@ -50,7 +50,7 @@ enum class SetupPage {
     }
 
     fun showActionButton(): Boolean = when (this) {
-        Mode -> UserDataManager.useExternalSync()
+        Mode -> UserDataManager.useExternalSync() || UserDataManager.isExternalDirect()
         else -> true
     }
 

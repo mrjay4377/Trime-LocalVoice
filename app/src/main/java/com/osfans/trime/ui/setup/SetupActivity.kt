@@ -8,9 +8,11 @@ package com.osfans.trime.ui.setup
 import android.app.PendingIntent
 import android.content.Intent
 import android.os.Bundle
+import android.provider.Settings
 import android.view.View
 import android.widget.Button
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.core.app.NotificationCompat
 import androidx.core.os.bundleOf
@@ -47,6 +49,13 @@ class SetupActivity : FragmentActivity() {
 
     private val storageAccess = StorageAccess(this)
 
+    /** 跳系统设置申请「所有文件访问权限」，用于 EXTERNAL_DIRECT 按真实路径直读资料夹。 */
+    private val allFilesLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            refreshCurrentFragment()
+            updateButtons()
+        }
+
     fun pickDataPath() {
         lifecycleScope.launch {
             val picked = storageAccess.pickDirectory() ?: return@launch
@@ -57,6 +66,11 @@ class SetupActivity : FragmentActivity() {
                 updateButtons()
                 toast(R.string.setup__data_path_imported)
                 skipButton.visibility = View.VISIBLE
+                // EXTERNAL_DIRECT 需要「所有文件访问」权限才能按真实路径直读资料夹，
+                // 选完目录后顺手引导去系统设置授予，授予后返回自动刷新按钮状态。
+                if (UserDataManager.isExternalDirect() && !UserDataManager.hasAllFilesAccess()) {
+                    allFilesLauncher.launch(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                }
             }.onFailure {
                 // Keep the picked folder: the user is not forced to pick again, and a folder that
                 // keeps failing makes the deploy path fall back to app-specific storage on its own.

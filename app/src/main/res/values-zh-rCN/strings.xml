@@ -127,6 +127,10 @@
     <string name="sync_from_external_desc">每次部署或同步用户数据前，从指定目录导入数据到内部存储，并在同步用户数据后导出到该目录。需要较多存储空间。推荐老用户使用。</string>
     <string name="use_app_specific_storage_desc">直接使用应用内部私有存储空间，用户需要使用支持的文件管理器管理数据。卸载应用时系统可能会询问是否保留数据，请随时做好备份。</string>
     <string name="external_sync_select_folder_message">外部同步需要选择数据文件夹。请选择存放 Trime 配置文件的位置。</string>
+    <string name="use_external_folder_directly">直接使用外部文件夹</string>
+    <string name="use_external_folder_directly_desc">直接将 Rime 数据存放在所选的外部文件夹，不做同步。需要「所有文件访问」权限，应用才能通过文件系统读写该文件夹。适合其他应用或原生库（例如离线语音识别）需要直接以文件方式访问模型时使用。</string>
+    <string name="external_direct_select_folder_message">「直接使用外部文件夹」会将 Rime 数据就地存放在所选文件夹（不做同步）。请选择要使用的文件夹；随后系统也会要求您授予「所有文件访问」权限，以便应用直接读写该文件夹。</string>
+    <string name="external_direct_needs_all_files">「直接使用外部文件夹」需要「所有文件访问」权限。请在系统设置中授予，随后即会直接使用所选文件夹。</string>
     <string name="external_sync_fallback_app_storage">文件夹选择失败或已取消。存储模式将还原为使用应用专属存储空间。</string>
     <string name="maintenance">维护</string>
     <string name="loading">正在加载</string>
