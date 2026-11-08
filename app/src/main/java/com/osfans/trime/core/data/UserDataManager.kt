@@ -112,7 +112,23 @@ object UserDataManager {
 
     private val externalFilesDir get() = TrimeApplication.getInstance().externalFilesDir
 
-    val userDataDir = File(externalFilesDir, "rime")
+    /**
+     * Rime 数据根目录。
+     *
+     * - 默认（EXTERNAL_SYNC / APP_STORAGE）：应用私有外部目录 `Android/data/<包名>/files/rime`。
+     * - EXTERNAL_DIRECT（直接使用外部文件夹）：解析使用者资料夹 tree URI 得到的真实文件路径，
+     *   由 native 引擎与文件管理器按路径直接读写；未选择目录或无「所有文件访问」权限时回退私有目录。
+     */
+    val userDataDir: File
+        get() {
+            // EXTERNAL_DIRECT 只有在持有「所有文件访问」权限后，才能按真实路径用 File/native 读写；
+            // 未授权时回退私有目录，避免 rime 往没有权限的路径里写而失败。
+            if (dataStorageMode == DataStorageMode.EXTERNAL_DIRECT && hasAllFilesAccess()) {
+                val ext = externalRimeDirAsFile()
+                if (ext != null) return ext.also { if (!it.isDirectory) it.mkdirs() }
+            }
+            return File(externalFilesDir, "rime").also { it.mkdirs() }
+        }
 
     private val dataStorageMode by AppPrefs.defaultInstance().profile.dataStorageMode
     private var externalRimeTreeUri by AppPrefs.defaultInstance().profile.externalRimeTreeUri
@@ -123,15 +139,26 @@ object UserDataManager {
 
     fun useExternalSync(): Boolean = dataStorageMode == DataStorageMode.EXTERNAL_SYNC
 
+    fun isExternalDirect(): Boolean = dataStorageMode == DataStorageMode.EXTERNAL_DIRECT
+
+    /** 是否已持有「所有文件访问权限」：Android 11+ 下 native/fopen 才能按真实路径读写使用者资料夹。 */
+    fun hasAllFilesAccess(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
+
     fun hasExternalAccess(): Boolean = StorageAccess.persistedPermissions().any {
         it.uri == externalRimeDir && it.read && it.write
     }
 
-    fun isStorageAvailable(): Boolean = !useExternalSync() || hasExternalAccess()
+    fun isStorageAvailable(): Boolean = when {
+        useExternalSync() -> hasExternalAccess()
+        isExternalDirect() -> hasAllFilesAccess()
+        else -> true
+    }
 
     fun isStorageChoiceDone(): Boolean = when (dataStorageMode) {
         DataStorageMode.APP_STORAGE -> true
         DataStorageMode.EXTERNAL_SYNC -> externalRimeTreeUri.isNotEmpty()
+        DataStorageMode.EXTERNAL_DIRECT -> externalRimeTreeUri.isNotEmpty() && hasAllFilesAccess()
     }
 
     /**
@@ -145,7 +172,9 @@ object UserDataManager {
      */
     @Suppress("DEPRECATION")
     fun externalRimeDirAsFile(): File? {
-        if (!useExternalSync()) return null
+        if (dataStorageMode != DataStorageMode.EXTERNAL_SYNC &&
+            dataStorageMode != DataStorageMode.EXTERNAL_DIRECT
+        ) return null
         val raw = externalRimeTreeUri
         if (raw.isEmpty()) return null
         val uri = runCatching { Uri.parse(raw) }.getOrNull() ?: return null
@@ -208,7 +237,9 @@ object UserDataManager {
     }
 
     suspend fun sync(): Boolean = lock.withLock {
-        if (!useExternalSync()) return@withLock true
+        // 只有「从外部存储同步」需要镜像；直接使用外部文件夹（EXTERNAL_DIRECT）与
+        // 应用私有存储（APP_STORAGE）都不做双向同步。
+        if (dataStorageMode != DataStorageMode.EXTERNAL_SYNC) return@withLock true
         if (!hasExternalAccess()) {
             DeployNotification.promptDataPathPermissionRevoked()
             return@withLock false

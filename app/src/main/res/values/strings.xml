@@ -128,9 +128,13 @@
     <string name="data_storage_mode">Data storage mode</string>
     <string name="sync_from_external">Sync from external storage</string>
     <string name="use_app_specific_storage">Use app-specific storage</string>
+    <string name="use_external_folder_directly">Use external folder directly</string>
+    <string name="use_external_folder_directly_desc">Store Rime data directly in the selected external folder with no sync. Requires the \"All files access\" permission so the app can read/write the folder via the filesystem. Best when other apps or native libraries (e.g. offline ASR) need direct file access to the models.</string>
     <string name="sync_from_external_desc">Before each deploy/sync, import configs from specified dir to internal storage, then export back after sync. Requires more storage space. Recommended for experienced users.</string>
     <string name="use_app_specific_storage_desc">Use internal private storage; users need a compatible file manager to access. On uninstall, system may ask to keep data — always have backups on hand.</string>
     <string name="external_sync_select_folder_message">External sync requires selecting a data folder. Select where trime configuration files will be stored.</string>
+    <string name="external_direct_select_folder_message">\"Use external folder directly\" stores Rime data in the chosen folder in place (no sync). Select the folder to use. You will also be asked to grant \"All files access\" so the app can read/write it directly.</string>
+    <string name="external_direct_needs_all_files">\"Use external folder directly\" needs the All files access permission. Please grant it in system settings; the chosen folder will then be used directly.</string>
     <string name="external_sync_fallback_app_storage">Folder selection failed or was cancelled. Storage mode will fall back to app-specific storage.</string>
     <string name="maintenance">Maintenance</string>
     <string name="loading">Loading</string>

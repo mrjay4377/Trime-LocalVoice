@@ -47,7 +47,8 @@ object DataManager {
     private val externalFilesDir get() = TrimeApplication.getInstance().externalFilesDir
 
     val sharedDataDir = File(externalFilesDir, "shared").also { it.mkdirs() }
-    val userDataDir = File(externalFilesDir, "rime").also { it.mkdirs() }
+    /** 跟随 UserDataManager 的存储模式：EXTERNAL_DIRECT 时即为使用者资料夹的真实路径。 */
+    val userDataDir: File get() = UserDataManager.userDataDir
 
     val prebuiltDataDir = File(sharedDataDir, "build")
     val stagingDir = File(userDataDir, "build")

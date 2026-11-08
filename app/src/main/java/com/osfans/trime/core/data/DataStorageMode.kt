@@ -10,6 +10,7 @@ import com.osfans.trime.R
 import com.osfans.trime.data.prefs.PreferenceDelegateEnum
 
 enum class DataStorageMode(override val stringRes: Int) : PreferenceDelegateEnum {
+    EXTERNAL_DIRECT(R.string.use_external_folder_directly),
     EXTERNAL_SYNC(R.string.sync_from_external),
     APP_STORAGE(R.string.use_app_specific_storage),
 }

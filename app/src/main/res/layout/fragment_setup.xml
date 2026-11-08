@@ -102,6 +102,23 @@
                 android:focusable="true"
                 android:text="@string/use_app_specific_storage_desc"
                 android:textSize="14sp" />
+
+            <RadioButton
+                android:id="@+id/external_direct_option"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/use_external_folder_directly" />
+
+            <TextView
+                android:id="@+id/external_direct_desc"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="32dp"
+                android:layout_marginBottom="12dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:text="@string/use_external_folder_directly_desc"
+                android:textSize="14sp" />
         </RadioGroup>
 
         <Button

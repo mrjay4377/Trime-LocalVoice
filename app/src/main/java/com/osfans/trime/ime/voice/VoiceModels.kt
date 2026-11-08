@@ -183,9 +183,11 @@ object VoiceModels {
             }
         }.getOrDefault(false)
 
-    /** 使用者资料夹 / voice；未开启、未授权、未选资料夹或不可写时返回 null。 */
+    /** 使用者资料夹 / voice；未开启、未授权、未选资料夹或不可写时返回 null。
+     *  全局存储模式为 EXTERNAL_DIRECT 时也算开启（模型跟随使用者资料夹）。 */
     private fun externalVoiceRoot(context: Context): File? {
-        if (!LocalVoiceSettings.useUserDataDir(context)) return null
+        val generalExternal = UserDataManager.isExternalDirect()
+        if (!LocalVoiceSettings.useUserDataDir(context) && !generalExternal) return null
         if (!hasAllFilesAccess()) return null
         val base = UserDataManager.externalRimeDirAsFile() ?: return null
         val voice = File(base, DIR_NAME)

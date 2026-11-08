@@ -6,12 +6,18 @@
 package com.osfans.trime.ui.main.settings
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.DocumentsContract
+import android.provider.Settings
 import android.text.InputType
 import android.widget.EditText
 import android.widget.FrameLayout
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
@@ -53,6 +59,9 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
     /** Set while the picker runs as part of switching the storage mode to external sync. */
     private var pendingExternalSyncSetup = false
 
+    /** Set while the picker runs as part of switching the storage mode to external direct. */
+    private var pendingExternalDirectSetup = false
+
     private val onBackgroundSyncEnable = PreferenceDelegate.OnChangeListener<Boolean> { _, v ->
         editSyncIntervalPreference.isEnabled = v
     }
@@ -82,6 +91,17 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
     private var webDavRestorePreference: Preference? = null
 
     private val storageAccess = StorageAccess(this)
+
+    /** 跳系统设置申请「所有文件访问权限」，用于 EXTERNAL_DIRECT 模式按真实路径直读资料夹。 */
+    private val allFilesLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            updateStorageModeUi()
+            updateDataPathSummary()
+            // 授予权限后资料夹变为可直接读写，重新部署以把配置落到外部资料夹。
+            if (prefs.dataStorageMode.getValue() == DataStorageMode.EXTERNAL_DIRECT) {
+                viewModel.rime.runOnReady { deploy() }
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -113,7 +133,9 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
 
     private fun updateStorageModeUi() {
         dataStorageModePreference.value = dataStorageMode.name
-        dataPathPreference.isEnabled = dataStorageMode == DataStorageMode.EXTERNAL_SYNC
+        dataPathPreference.isEnabled =
+            dataStorageMode == DataStorageMode.EXTERNAL_SYNC ||
+            dataStorageMode == DataStorageMode.EXTERNAL_DIRECT
     }
 
     private fun pickDataPath() {
@@ -125,12 +147,17 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
                 if (pendingExternalSyncSetup) {
                     pendingExternalSyncSetup = false
                     cancelExternalSyncSetup()
+                } else if (pendingExternalDirectSetup) {
+                    pendingExternalDirectSetup = false
+                    cancelExternalDirectSetup()
                 }
                 return@launch
             }
             val ctx = requireContext()
             val externalSyncSetup = pendingExternalSyncSetup
+            val externalDirectSetup = pendingExternalDirectSetup
             pendingExternalSyncSetup = false
+            pendingExternalDirectSetup = false
             lifecycleScope.launch {
                 withLoadingDialog(ctx) {
                     runCatching {
@@ -141,8 +168,14 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
                     }.onSuccess {
                         updateDataPathSummary()
                         ctx.toast(R.string.setup__data_path_imported)
+                        // 直接使用外部文件夹：选完目录后还需「所有文件访问」权限才能按路径直读。
+                        if (prefs.dataStorageMode.getValue() == DataStorageMode.EXTERNAL_DIRECT &&
+                            !UserDataManager.hasAllFilesAccess()
+                        ) {
+                            requestAllFilesAccess()
+                        }
                     }.onFailure {
-                        if (externalSyncSetup) {
+                        if (externalSyncSetup || externalDirectSetup) {
                             fallbackToAppStorage()
                         } else {
                             // Keep the picked folder: it stays the user's choice, and a folder
@@ -186,6 +219,34 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
     private fun cancelExternalSyncSetup() {
         prefs.dataStorageMode.setValue(DataStorageMode.APP_STORAGE)
         updateStorageModeUi()
+    }
+
+    /** Prompts the user to pick a folder for the "use external folder directly" mode. */
+    private fun promptExternalDirectFolderSelection() {
+        val ctx = requireContext()
+        AlertDialog
+            .Builder(ctx)
+            .setMessage(R.string.external_direct_select_folder_message)
+            .setPositiveButton(R.string.setup__select_data_path) { _, _ ->
+                pendingExternalDirectSetup = true
+                pickDataPath()
+            }.setNegativeButton(android.R.string.cancel) { _, _ ->
+                cancelExternalDirectSetup()
+            }.setOnCancelListener {
+                cancelExternalDirectSetup()
+            }.show()
+    }
+
+    /** Falls back to app-specific storage when the user gives up on the direct-folder setup. */
+    private fun cancelExternalDirectSetup() {
+        prefs.dataStorageMode.setValue(DataStorageMode.APP_STORAGE)
+        updateStorageModeUi()
+    }
+
+    /** 跳系统设置申请「所有文件访问权限」（EXTERNAL_DIRECT 模式按真实路径直读资料夹所必需）。 */
+    private fun requestAllFilesAccess() {
+        if (UserDataManager.hasAllFilesAccess()) return
+        allFilesLauncher.launch(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
     }
 
     private fun fallbackToAppStorage() {
@@ -566,19 +627,26 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
                             val mode =
                                 DataStorageMode.valueOf(newValue as String)
                             prefs.dataStorageMode.setValue(mode)
-                            if (
+                            when {
+                                mode == DataStorageMode.EXTERNAL_DIRECT -> {
+                                    // 需要选过资料夹 + 所有文件权限；缺哪个补哪个。
+                                    if (externalRimeDir.isEmpty()) {
+                                        promptExternalDirectFolderSelection()
+                                    } else if (!UserDataManager.hasAllFilesAccess()) {
+                                        requestAllFilesAccess()
+                                    }
+                                }
                                 oldMode == DataStorageMode.APP_STORAGE &&
-                                mode == DataStorageMode.EXTERNAL_SYNC &&
-                                !UserDataManager.hasExternalAccess()
-                            ) {
-                                promptExternalSyncFolderSelection()
-                            } else if (
+                                    mode == DataStorageMode.EXTERNAL_SYNC &&
+                                    !UserDataManager.hasExternalAccess() -> {
+                                    promptExternalSyncFolderSelection()
+                                }
                                 oldMode == DataStorageMode.EXTERNAL_SYNC &&
-                                mode == DataStorageMode.APP_STORAGE
-                            ) {
-                                // The picked folder and its grant are kept, so switching back to
-                                // external sync does not ask the user to pick it again.
-                                updateDataPathSummary()
+                                    mode == DataStorageMode.APP_STORAGE -> {
+                                    // The picked folder and its grant are kept, so switching back to
+                                    // external sync does not ask the user to pick it again.
+                                    updateDataPathSummary()
+                                }
                             }
                             true
                         }

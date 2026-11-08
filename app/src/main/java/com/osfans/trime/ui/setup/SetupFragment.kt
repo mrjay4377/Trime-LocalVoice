@@ -33,6 +33,7 @@ class SetupFragment : Fragment() {
                 val newMode = when (checkedId) {
                     R.id.sync_from_external_option -> DataStorageMode.EXTERNAL_SYNC
                     R.id.app_specific_storage_option -> DataStorageMode.APP_STORAGE
+                    R.id.external_direct_option -> DataStorageMode.EXTERNAL_DIRECT
                     else -> return@setOnCheckedChangeListener
                 }
                 prefs.dataStorageMode.setValue(newMode)
@@ -41,6 +42,7 @@ class SetupFragment : Fragment() {
             }
             syncFromExternalDesc.setOnClickListener { syncFromExternalOption.isChecked = true }
             appSpecificStorageDesc.setOnClickListener { appSpecificStorageOption.isChecked = true }
+            externalDirectDesc.setOnClickListener { externalDirectOption.isChecked = true }
         }
         sync()
         return binding.root
@@ -53,6 +55,7 @@ class SetupFragment : Fragment() {
         val checkedId = when (prefs.dataStorageMode.getValue()) {
             DataStorageMode.EXTERNAL_SYNC -> R.id.sync_from_external_option
             DataStorageMode.APP_STORAGE -> R.id.app_specific_storage_option
+            DataStorageMode.EXTERNAL_DIRECT -> R.id.external_direct_option
         }
         with(binding) {
             storageModeOptions.visibility = if (isStorageModePage) View.VISIBLE else View.GONE

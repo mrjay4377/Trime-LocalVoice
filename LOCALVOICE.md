@@ -459,3 +459,19 @@ v42 改动仍留在工作树未提交（最新提交仍是 `7f0f5c0b`）。
 
 **说明**：v44 的结论「SAF 授权无法让 native 直读用户目录」成立，但漏算了 `MANAGE_EXTERNAL_STORAGE` 这条路——持有该权限后 `File` / `fopen` 即可读写使用者资料夹。方案 B 即走此路；未授权 / 未选资料夹时自动回退私有目录，识别行为不变。
 
+## v46：资料儲存模式补齐「直接使用外部文件夹」（对齐咩版 配置>儲存）
+
+| 项目 | 改动 |
+| --- | --- |
+| 需求背景 | 咩版「配置 > 儲存 > 資料儲存模式」是三选一单选（直接使用外部文件夹 / 從外部存储同步 / 应用专用存储）；本支原只有后两项，缺第一项。补上 `EXTERNAL_DIRECT`。 |
+| DataStorageMode | 新增 `EXTERNAL_DIRECT(R.string.use_external_folder_directly)`，放在枚举首位，列表顺序与咩版一致。 |
+| UserDataManager | `userDataDir` 改为按模式解析：EXTERNAL_DIRECT 且已持有「所有文件访问」权限时，返回 `externalRimeDirAsFile()` 的真实路径（native 直读）；否则回退私有目录；新增 `isExternalDirect()` / `hasAllFilesAccess()`；`externalRimeDirAsFile()` 解除「仅 EXTERNAL_SYNC」限制也支持 DIRECT；`isStorageChoiceDone` / `isStorageAvailable` / `sync()` 均纳入 DIRECT（DIRECT 不做双向镜像）。 |
+| DataManager | `userDataDir` 改为委托 `UserDataManager.userDataDir`，使主题 / 语音 / WebDAV 等全部跟随存储模式，避免与 rime 根目录不一致。 |
+| VoiceModels | `externalVoiceRoot()` 增加「全局 EXTERNAL_DIRECT 也算开启」分支，模型跟随使用者资料夹。 |
+| ProfileSettingsFragment | 存储模式 `ListPreference` 自动列出三项；DIRECT 下「资料目录」行可点选；选中 DIRECT 时若无资料夹则弹窗选目录、若未授权则跳系统设置申请「所有文件访问权限」；选完目录后自动申请权限，授权后自动重新部署。 |
+| SetupFragment + 布局 | 初始设置页 RadioGroup 增加「直接使用外部文件夹」选项（含描述），映射 `R.id.external_direct_option`。 |
+| 字符串 | 新增 `use_external_folder_directly` / `use_external_folder_directly_desc` / `external_direct_select_folder_message` / `external_direct_needs_all_files`。 |
+
+**说明**：此模式即 v45 方案 B 的「通用化」——之前 v45 只在语音设置里用 `useUserDataDir` 开关表达，现在收归到全局资料儲存模式，与咩版一致；语音模型目录（`candidateRoots` 首选 `externalVoiceRoot`）随之落在外部资料夹 `/voice`，sherpa-onnx 按路径直读。DIRECT 与 EXTERNAL_SYNC 的区别：前者按真实路径原地读写，后者与 SAF 资料夹做双向镜像。
+
+
