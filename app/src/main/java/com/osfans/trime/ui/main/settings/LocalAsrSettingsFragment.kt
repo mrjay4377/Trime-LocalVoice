@@ -73,7 +73,6 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     }
 
     private val main = Handler(Looper.getMainLooper())
-    private var modelStatusPreference: Preference? = null
     private var permissionPreference: Preference? = null
     private var vendorPreference: Preference? = null
     private var threadsPreference: ListPreference? = null
@@ -117,34 +116,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         ModelInstaller.writeInstalledIndex(ctx)
 
         preferenceScreen = preferenceManager.createPreferenceScreen(ctx).apply {
-            // 参照咩版「识别服务与模型」页：先状态，再「语音输入」开关组，再「模型」组，最后识别选项。
-            addPreference(category(ctx, KEY_CATEGORY_STATUS, "当前状态"))
-
-            addPreference(
-                Preference(ctx).apply {
-                    key = KEY_STATUS
-                    title = getString(R.string.local_asr_model_status)
-                    isIconSpaceReserved = false
-                    isSelectable = true
-                    modelStatusPreference = this
-                    setOnPreferenceClickListener {
-                        val status = runCatching { VoiceModels.status(ctx, LocalVoiceSettings.vendor(ctx)) }
-                            .getOrNull()
-                        if (status?.ready == true) {
-                            showModelDetail(ctx)
-                        } else {
-                            val recommended = ModelCatalog.VARIANTS.minByOrNull { it.downloadMiB }
-                            if (recommended != null) {
-                                confirmDownload(ctx, recommended) { refresh(ctx) }
-                            } else {
-                                showModelList(ctx)
-                            }
-                        }
-                        true
-                    }
-                },
-            )
-
+            // 参照咩版「识别服务与模型」页：先「语音输入」开关组，再「识别服务与模型」，最后识别选项。
             addPreference(category(ctx, KEY_CATEGORY_BASIC, "语音输入"))
 
             addPreference(
@@ -1345,7 +1317,6 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         } else {
             getString(R.string.local_asr_permission_denied)
         }
-        modelStatusPreference?.summary = buildModelSummary(ctx)
 
         val family = LocalVoiceSettings.vendor(ctx)
         vendorPreference?.summary = buildEngineSummary(ctx, family)
@@ -1459,21 +1430,6 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         return if (name.isBlank()) "当前：空" else "当前：$name"
     }
 
-    /** 状态项只给结论：没模型就一句话，检测到才出现模型名称；完整信息仍在详情弹窗。 */
-    private fun buildModelSummary(ctx: Context): String {
-        val familyId = LocalVoiceSettings.vendor(ctx)
-        val status = runCatching { VoiceModels.status(ctx, familyId) }.getOrNull()
-            ?: return getString(R.string.local_asr_model_unknown)
-        val dir = status.resolved?.dir ?: return "未检测到完整模型"
-        val name =
-            ModelCatalog.VARIANTS
-                .firstOrNull { it.familyId == familyId && ModelInstaller.installedDir(ctx, it) == dir }
-                ?.displayName
-                ?: ModelInstaller.installedModels(ctx).firstOrNull { it.dir == dir }?.label
-                ?: dir.name
-        return "已检测到：$name"
-    }
-
     /** 咩版式说明分层：完整模型信息（目录、缺件、官方包名）只在点击后展示。 */
     private fun showModelDetail(ctx: Context) {
         val familyId = LocalVoiceSettings.vendor(ctx)
@@ -1514,8 +1470,6 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         const val KEY_ENABLED = "lv_enabled"
         const val KEY_VENDOR = "lv_vendor"
         const val KEY_PERMISSION = "lv_permission"
-        const val KEY_STATUS = "lv_status"
-        const val KEY_CATEGORY_STATUS = "lv_category_status"
         const val KEY_CATEGORY_BASIC = "lv_category_basic"
         const val KEY_CATEGORY_MODELS = "lv_category_models"
         const val KEY_MODELS = "lv_models"
