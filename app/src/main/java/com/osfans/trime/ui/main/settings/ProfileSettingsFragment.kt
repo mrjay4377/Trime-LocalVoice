@@ -99,7 +99,9 @@ class ProfileSettingsFragment : PaddingPreferenceFragment() {
             updateDataPathSummary()
             // 授予权限后资料夹变为可直接读写，重新部署以把配置落到外部资料夹。
             if (prefs.dataStorageMode.getValue() == DataStorageMode.EXTERNAL_DIRECT) {
-                viewModel.rime.runOnReady { deploy() }
+                lifecycleScope.launch {
+                    viewModel.rime.runOnReady { deploy() }
+                }
             }
         }
 
