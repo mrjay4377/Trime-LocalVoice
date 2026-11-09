@@ -23,7 +23,11 @@ import com.osfans.trime.ime.bar.ui.ToolButton
 import com.osfans.trime.ime.broadcast.InputBroadcastReceiver
 import com.osfans.trime.ime.core.TrimeInputMethodService
 import com.osfans.trime.ime.dialog.EnabledSchemaPickerDialog
+import com.osfans.trime.ime.keyboard.KeyboardLayoutMode
+import com.osfans.trime.ime.keyboard.KeyboardLayoutState
+import com.osfans.trime.ime.keyboard.KeyboardWindow
 import com.osfans.trime.ime.window.BoardWindow
+import com.osfans.trime.ime.window.BoardWindowManager
 import com.osfans.trime.ui.main.settings.ThemePickerDialog
 import com.osfans.trime.util.AppUtils
 import kotlinx.coroutines.launch
@@ -45,10 +49,30 @@ class SwitchOptionWindow(di: DI) :
     private val scope: ThemeScope by instance()
     private val theme: Theme get() = scope.theme
 
-    private val staticEntries by lazy {
-        arrayOf(
+    /** 每次打开/切换后重建，让两个布局入口的标签带上当前状态。 */
+    private fun buildStaticEntries(): Array<SwitchOptionEntry> {
+        val mode = KeyboardLayoutState.mode()
+        val oneHandLabel =
+            when (mode) {
+                KeyboardLayoutMode.ONE_HAND_LEFT ->
+                    context.getString(R.string.one_hand_keyboard_mode) +
+                        " · " + context.getString(R.string.one_hand_left)
+                KeyboardLayoutMode.ONE_HAND_RIGHT ->
+                    context.getString(R.string.one_hand_keyboard_mode) +
+                        " · " + context.getString(R.string.one_hand_right)
+                else -> context.getString(R.string.one_hand_keyboard_mode)
+            }
+        val floatingLabel =
+            if (mode == KeyboardLayoutMode.FLOATING) {
+                context.getString(R.string.floating_keyboard) +
+                    " · " + context.getString(R.string.keyboard_layout_on)
+            } else {
+                context.getString(R.string.floating_keyboard)
+            }
+        // 与咩版一致：最前两项固定为「键盘样式」「方案」，模式切换放在其后。
+        return arrayOf(
             SwitchOptionEntry.Static(
-                context.getString(R.string.theme),
+                context.getString(R.string.keyboard_style),
                 R.drawable.ic_baseline_color_lens_24,
                 SwitchOptionEntry.Static.Type.ThemeList,
             ),
@@ -56,6 +80,16 @@ class SwitchOptionWindow(di: DI) :
                 context.getString(R.string.schemata),
                 R.drawable.ic_round_view_list_24,
                 SwitchOptionEntry.Static.Type.SchemaList,
+            ),
+            SwitchOptionEntry.Static(
+                floatingLabel,
+                R.drawable.ic_baseline_floating_keyboard_24,
+                SwitchOptionEntry.Static.Type.FloatingKeyboard,
+            ),
+            SwitchOptionEntry.Static(
+                oneHandLabel,
+                R.drawable.ic_baseline_one_hand_mode_24,
+                SwitchOptionEntry.Static.Type.OneHandMode,
             ),
             SwitchOptionEntry.Static(
                 context.getString(R.string.update_config),
@@ -71,6 +105,13 @@ class SwitchOptionWindow(di: DI) :
     }
 
     var popupMenu: PopupMenu? = null
+
+    private val windowManager: BoardWindowManager by instance()
+
+    /** 切换后回到键盘，让用户直接看到效果而不是停留在菜单页。 */
+    private fun returnToKeyboard() {
+        windowManager.attachWindow(KeyboardWindow)
+    }
 
     private val saveOptions by lazy {
         RimeConfig.openConfig("default").use {
@@ -127,6 +168,55 @@ class SwitchOptionWindow(di: DI) :
                                 r.commitComposition()
                             }
                         }
+
+                        SwitchOptionEntry.Static.Type.OneHandMode -> {
+                            val popup = PopupMenu(context, view)
+                            val labels =
+                                arrayOf(
+                                    context.getString(R.string.keyboard_layout_normal),
+                                    context.getString(R.string.one_hand_left),
+                                    context.getString(R.string.one_hand_right),
+                                )
+                            val modes =
+                                arrayOf(
+                                    KeyboardLayoutMode.NORMAL,
+                                    KeyboardLayoutMode.ONE_HAND_LEFT,
+                                    KeyboardLayoutMode.ONE_HAND_RIGHT,
+                                )
+                            labels.forEachIndexed { i, label ->
+                                popup.menu.add(0, i, i, label).setOnMenuItemClickListener {
+                                    KeyboardLayoutState.setMode(service, modes[i])
+                                    Toast.makeText(service, label, Toast.LENGTH_SHORT).show()
+                                    refreshEntries()
+                                    returnToKeyboard()
+                                    true
+                                }
+                            }
+                            popupMenu?.dismiss()
+                            popupMenu = popup
+                            popup.show()
+                        }
+
+                        SwitchOptionEntry.Static.Type.FloatingKeyboard -> {
+                            val next =
+                                if (KeyboardLayoutState.mode() == KeyboardLayoutMode.FLOATING) {
+                                    KeyboardLayoutMode.NORMAL
+                                } else {
+                                    KeyboardLayoutMode.FLOATING
+                                }
+                            KeyboardLayoutState.setMode(service, next)
+                            Toast.makeText(
+                                service,
+                                if (next == KeyboardLayoutMode.FLOATING) {
+                                    R.string.floating_keyboard_tip
+                                } else {
+                                    R.string.floating_keyboard_off
+                                },
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                            refreshEntries()
+                            returnToKeyboard()
+                        }
                     }
 
                     is SwitchOptionEntry.Custom -> {
@@ -168,11 +258,13 @@ class SwitchOptionWindow(di: DI) :
         }
     }
 
+    private fun refreshEntries() = updateSchemaOptionEntries()
+
     private fun updateSchemaOptionEntries() {
         val switches = rime.run { schemaCached }.switches
         adapter.submitList(
             listOf(
-                *staticEntries,
+                *buildStaticEntries(),
                 *switches.mapNotNull { SwitchOptionEntry.fromSwitch(rime, it) }.toTypedArray(),
             ),
         )
@@ -220,12 +312,13 @@ class SwitchOptionWindow(di: DI) :
     override fun onCreateBarView() = barExternalView
 
     override fun onAttached() {
+        KeyboardLayoutState.attach(service)
         rime.launchOnReady { api ->
             val data = api.currentSchema().switches
             service.lifecycleScope.launch {
                 adapter.submitList(
                     listOf(
-                        *staticEntries,
+                        *buildStaticEntries(),
                         *data.mapNotNull { SwitchOptionEntry.fromSwitch(rime, it) }.toTypedArray(),
                     ),
                 )

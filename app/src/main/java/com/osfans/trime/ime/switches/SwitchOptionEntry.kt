@@ -20,6 +20,8 @@ sealed class SwitchOptionEntry(
             UpdateConfig,
             Keyboard,
             ThemeList,
+            OneHandMode,
+            FloatingKeyboard,
         }
     }
 

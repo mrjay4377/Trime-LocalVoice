@@ -69,6 +69,23 @@ class KeyAction(
     val modifierKeyOnMask: Int
         get() = getModifierKeyOnMask(this.code)
 
+    /**
+     * 供本地语音「跟随输入法简/繁开关」读取：
+     * 若本键是简/繁切换键，返回「toggle 为 true 时是否输出繁体」；其它键返回 null。
+     *
+     * 主题里 states 的顺序决定语义（states[0] 对应 option=false，states[1] 对应 true）：
+     * `[漢字, 汉字]` → true 是简体；`[汉字, 漢字]` → true 是繁体。
+     * 用按键本身而不是写死 option 名，才能兼容 zh_simp / zh_hant 等不同方案命名。
+     */
+    fun traditionalWhenToggleOn(): Boolean? {
+        if (toggle.isEmpty() || toggle == "ascii_mode" || states.size < 2) return null
+        val on = states[1]
+        val off = states[0]
+        val isCharsetKey = (on + off).any { it == '漢' || it == '汉' || it == '繁' || it == '简' }
+        if (!isCharsetKey) return null
+        return on.any { it == '漢' || it == '繁' } || on.contains("正體") || on.contains("正体")
+    }
+
     // Display label; computed lazily because the fallbacks read the Android
     // key character map (see [ensureLabels]).
     private var label: String = ""

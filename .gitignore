@@ -477,6 +477,7 @@ app/src/main/assets/shared/opencc
 # boost
 app/boost-*.tar.xz
 app/src/main/jni/boost/
+app/src/main/jni/boost-*/
 
 # kotlin
 .kotlin

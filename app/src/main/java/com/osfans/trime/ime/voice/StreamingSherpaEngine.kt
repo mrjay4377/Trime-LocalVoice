@@ -96,7 +96,12 @@ internal object SherpaOnlineManager {
             val hit = cached
             // 有会话正在使用识别器时一律不换、不释放：配置变更（含 pendingUnload）
             // 都推迟到 endSession() 之后生效，杜绝 native use-after-free。
-            if (activeSessions > 0 && hit != null) return@synchronized hit
+            if (activeSessions > 0 && hit != null) {
+                // 空闲定时器恰好在本次说话时到点：撤销待释放标记，别把正在用的模型卸掉，
+                // 会话结束后 applyIdleUnloadPolicy() 会重新计时。
+                pendingUnload = false
+                return@synchronized hit
+            }
             if (hit != null && cachedKey == key && !pendingUnload) return@synchronized hit
             onLoadStart?.invoke()
             hit?.let { releaseRecognizer(it) }
@@ -440,8 +445,25 @@ class StreamingSherpaEngine(
             } finally {
                 session = null
                 online?.release()
+                // 必须先归还会话，unload() 才不会因 activeSessions > 0 只挂一个 pending 标记。
                 if (sessionHeld) SherpaOnlineManager.endSession()
+                applyIdleUnloadPolicy()
             }
+        }
+    }
+
+    /**
+     * 会话结束后按「模型驻留内存」安排卸载，与离线引擎 decodeOffline 的策略保持一致：
+     * >0 空闲 N 分钟后卸载（含设置页的自定义分钟数）、0 用完即卸、-1 常驻内存、
+     * -2 跟随键盘（由 VoiceLifecycle 在键盘隐藏时安排，这里不抢）。
+     * 之前流式引擎只有「跟随键盘」档会卸载，固定档与自定义值都不生效，这里补齐。
+     */
+    private fun applyIdleUnloadPolicy() {
+        val minutes = LocalVoiceSettings.keepAliveMinutes(context, familyId)
+        when {
+            minutes > 0 -> SherpaOnlineManager.scheduleUnload(minutes.toLong() * 60_000L)
+            minutes == 0 -> SherpaOnlineManager.unload()
+            else -> Unit
         }
     }
 

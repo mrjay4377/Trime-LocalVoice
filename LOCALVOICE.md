@@ -472,6 +472,27 @@ v42 改动仍留在工作树未提交（最新提交仍是 `7f0f5c0b`）。
 | SetupFragment + 布局 | 初始设置页 RadioGroup 增加「直接使用外部文件夹」选项（含描述），映射 `R.id.external_direct_option`。 |
 | 字符串 | 新增 `use_external_folder_directly` / `use_external_folder_directly_desc` / `external_direct_select_folder_message` / `external_direct_needs_all_files`。 |
 
+## 构建状态（2026-11-08，本地成功出包）
+
+- 工具链位置：`…/2026-11-02-19-43-31/toolchain/{jdk17/jdk17, android-sdk}`（JDK 17.0.20.1 Temurin、Android SDK platform-37 / build-tools 37.0.0 / NDK 30、Gradle 9.8.1 分发缓存在 `~/.gradle`）。
+- 命令：`export JAVA_HOME=…/toolchain/jdk17/jdk17; export ANDROID_HOME=…/toolchain/android-sdk; unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY; ./gradlew :app:assembleRelease --no-daemon`（`gradle.properties` 已设 `buildABI=arm64-v8a`）。
+- release 未配 keystore → 产出 **unsigned** APK，再用 `python scripts/repack_apk.py <unsigned> <signed>` 以 `~/.android/debug.keystore`（alias `androiddebugkey` / pwd `android`）zipalign + 重签，apksigner verify 通过（v1/v2/v3）。
+- 本次构建修复一处编译错误：`ProfileSettingsFragment.allFilesLauncher` 回调内 `runOnReady{deploy()}` 是 suspend，须包进 `lifecycleScope.launch`（提交 `bbacb12c`）。
+- 产出 APK：`app/build/outputs/apk/release/com.osfans.trime-c5179423-arm64-v8a-release-signed.apk`（约 18.1 MB，含 v45+v46）。
+- 注：`MANAGE_EXTERNAL_STORAGE` 在 `targetSdk 37` 下上架 Play 受限，仅适合侧载 / F-Droid / 自用。
+
 **说明**：此模式即 v45 方案 B 的「通用化」——之前 v45 只在语音设置里用 `useUserDataDir` 开关表达，现在收归到全局资料儲存模式，与咩版一致；语音模型目录（`candidateRoots` 首选 `externalVoiceRoot`）随之落在外部资料夹 `/voice`，sherpa-onnx 按路径直读。DIRECT 与 EXTERNAL_SYNC 的区别：前者按真实路径原地读写，后者与 SAF 资料夹做双向镜像。
+
+## v48：voice 下多套引擎可切换 + 简繁「跟随输入法开关」修复
+
+| 问题 | 根因 | 处理 |
+| --- | --- | --- |
+| 目录里放了好几套引擎，只能识别 / 选中一个 | ① `ModelInstaller.localPackages` 按文件组推断家族，而 sensevoice / firered_asr / telespeech 的必需文件完全相同，`firstOrNull` 永远返回第一个家族；② 选中项只存 `familyId + 目录名`，识别时拼成 `voice/<family>/<目录名>`，手动放的目录不在这层就解析失败，回退到自动扫描的第一套；③ `VoiceModels.attempt()` 把整棵目录树的文件合成一张索引，多套模型会跨目录拼凑或只命中第一套 | 新增 `VoiceModels.inferFamilyByName()`（官方包名特征词：qwen3 / funasr / paraformer / x-asr / parakeet / firered / telespeech / sensevoice）与 `inferFamilyByFiles()`；新增 `LocalVoiceSettings.selectedModelDir` 记住选中模型的**绝对目录**，`status()` 最高优先级按它解析；`attempt()` 改为「直属文件优先，再逐个单独尝试子目录」，绝不跨目录混用；引擎列表用绝对路径做选项值并列出每一套本地包 |
+| 目录名不含特征词时引擎推断可能不对 | 文件组相同就无从区分 | 「本地语音包」操作菜单新增「更换识别引擎类型」，可手动指定 8 个家族之一；菜单里显示当前推断的引擎名 |
+| 简繁转换选「跟随输入法简/繁开关」没生效 | `TrimeInputMethodService.isTraditionalMode` 只认 `simplification` / `traditional`，且要求它们出现在当前方案 `switches` 里。预设 `luna_pinyin_simp` 用的是 `zh_simp`，`luna_pinyin_fluency` 没有 switches，主题里的简/繁键又可能 toggle 任意 option → 恒返回 false，跟随档永远输出简体 | `KeyAction.traditionalWhenToggleOn()` 从主题 `states` 顺序读出「option=true 是简还是繁」；`handleSwitchCharset` 把键盘简/繁键实际使用的 option 名与语义记进 `LocalVoiceSettings`；`isTraditionalMode` 优先读这个 option（最贴合用户看到的开关），其次读方案确实声明过的常见简/繁 option（`zh_simp`/`zh_hans`/`zh_hant`/`s2t`…），最后用 native `statusCached.isTraditional` 兜底；不再每次 `currentSchema()` 重新打开配置，改用 `schemaCached`；上屏日志打出 `mode` 与 `traditional` 便于诊断 |
+
+**构建**：release（`-O3` + R8）→ `repack_apk.py` 重压 + 同一 debug key 重签，18,995,554 B，`apksigner` v1/v2/v3 通过，可覆盖 v47。
+交付：`app/build/outputs/apk/release/com.osfans.trime-v48-arm64-v8a-release-signed.apk`。
+按「暂停备份」要求，本轮未 commit / 未 push，改动留在工作树。
 
 

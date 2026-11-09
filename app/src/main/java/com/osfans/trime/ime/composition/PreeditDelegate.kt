@@ -73,6 +73,11 @@ class PreeditDelegate(override val di: DI) :
 
     private val touchEventReceiverWindow = TouchEventReceiverWindow(ui.root)
 
+    /** 悬浮卡片移动 / 缩放后，同步编码栏的透明触摸窗口位置与尺寸。 */
+    fun updateTouchReceiverPosition() {
+        if (touchEventReceiverWindow.isShowing()) touchEventReceiverWindow.show()
+    }
+
     override fun onCompositionUpdate(data: CompositionProto) {
         ui.update(data)
         ui.root.visibility = if (ui.visible) View.VISIBLE else View.INVISIBLE

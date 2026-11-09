@@ -21,12 +21,14 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.text.InputType
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.RadioButton
@@ -392,13 +394,22 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     isIconSpaceReserved = false
                     keepAlivePreference = this
                     setOnPreferenceChangeListener { _, newValue ->
-                        LocalVoiceSettings.setKeepAliveMinutes(
-                            ctx,
-                            LocalVoiceSettings.vendor(ctx),
-                            (newValue as String).toInt(),
-                        )
-                        refresh(ctx)
-                        true
+                        val picked = newValue as String
+                        if (picked == KEEP_ALIVE_CUSTOM) {
+                            // 「自定义」只是入口，不能作为真实值写进 ListPreference；
+                            // 返回 false 保持原选中项，输入确认后由 refresh() 重新定位到这一项。
+                            // 延到下一消息循环，等选项弹窗先关掉再开输入框，避免两层对话框叠在一起。
+                            main.post { if (isAdded) showCustomKeepAliveDialog(ctx) }
+                            false
+                        } else {
+                            LocalVoiceSettings.setKeepAliveMinutes(
+                                ctx,
+                                LocalVoiceSettings.vendor(ctx),
+                                picked.toInt(),
+                            )
+                            refresh(ctx)
+                            true
+                        }
                     }
                 },
             )
@@ -588,35 +599,35 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     private fun localPackages(ctx: Context): List<LocalVoicePackage> =
         runCatching { ModelInstaller.localPackages(ctx) }.getOrDefault(emptyList())
 
+    /** 用绝对路径做选项值：不同目录下同名文件夹不会互相覆盖，选中哪套就固定用哪套。 */
     private fun localValue(pkg: LocalVoicePackage): String =
-        "local|${pkg.familyId}|${pkg.key}"
-
-    /** 只把「非规格目录」的本地包单列，避免与下面「已安装」的规格模型重复。 */
-    private fun manualPackages(ctx: Context): List<LocalVoicePackage> {
-        val catalogIds = ModelCatalog.VARIANTS.map { it.id }.toHashSet()
-        return localPackages(ctx).filterNot { "${it.familyId}/${it.key}" in catalogIds }
-    }
+        "local|${pkg.familyId}|${pkg.dir.absolutePath}"
 
     /**
-     * 「语音识别引擎」只列 voice 目录里真实存在的模型：手动放置 / ZIP 导入的本地包置顶，
-     * 其后是已下载安装的规格模型。未安装的可下载模型统一放到「下载并安装模型」里，
-     * 避免选择引擎时混进一堆点了只会触发下载的项。
+     * 「语音识别引擎」列出 voice 目录里**每一套**真实存在的模型。
+     * 以前只列「非规格目录」的手动包，再加上按 family/key 推断的规格项，
+     * 多套引擎放在同一目录时会被合并成一项，导致只能选到一个引擎。
      */
     private fun engineRows(ctx: Context): List<EngineRow> {
         val rows = mutableListOf<EngineRow>()
-        val manual = manualPackages(ctx)
-        if (manual.isNotEmpty()) {
-            rows += EngineRow.Header("本地语音包（手动放置 / ZIP 导入）· 点击设为当前")
-            manual.forEach { pkg ->
+        val packages = localPackages(ctx)
+        if (packages.isNotEmpty()) {
+            rows += EngineRow.Header("本地语音包（共 ${packages.size} 套）· 点击设为当前")
+            packages.forEach { pkg ->
+                val engineName = VoiceModels.family(pkg.familyId)?.label?.substringBefore("（")
+                    ?: pkg.familyId
                 rows += EngineRow.Option(
                     localValue(pkg),
-                    pkg.label,
+                    "$engineName · ${pkg.dir.name}",
                     "${formatMiB(pkg.sizeBytes)} · ${displayPath(ctx, pkg.dir.absolutePath)}",
                 )
             }
         }
+        // 只补列没被扫描进本地包的规格模型（例如装在旧位置的目录），避免重复项。
+        val listed = packages.map { it.dir.absolutePath }.toHashSet()
         val ready = ModelCatalog.VARIANTS
             .filter { ModelInstaller.isInstalled(ctx, it) }
+            .filterNot { ModelInstaller.installedDir(ctx, it).absolutePath in listed }
             .sortedWith(compareBy({ it.familyLabel }, { it.downloadMiB }))
         if (ready.isNotEmpty()) {
             rows += EngineRow.Header("已安装模型 · 点击设为当前")
@@ -640,10 +651,13 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         if (value.startsWith("local|")) {
             val parts = value.split('|', limit = 3)
             val familyId = parts.getOrElse(1) { "" }
-            val key = parts.getOrElse(2) { "" }
+            val path = parts.getOrElse(2) { "" }
             if (familyId.isNotBlank()) {
                 LocalVoiceSettings.setVendor(ctx, familyId)
-                LocalVoiceSettings.setSelectedVariant(ctx, familyId, key)
+                // 旧版把目录名存在 selectedVariant 里，这里统一改成记住绝对目录，
+                // 用户目录下的任意引擎文件夹都能被准确选中并切换。
+                LocalVoiceSettings.setSelectedVariant(ctx, familyId, "")
+                LocalVoiceSettings.setSelectedModelDir(ctx, path)
             }
             refresh(ctx)
             return
@@ -653,6 +667,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         if (variantKey.isEmpty()) {
             LocalVoiceSettings.setVendor(ctx, familyId)
             LocalVoiceSettings.setSelectedVariant(ctx, familyId, "")
+            LocalVoiceSettings.setSelectedModelDir(ctx, "")
             refresh(ctx)
             return
         }
@@ -675,9 +690,16 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         val rows = engineRows(ctx)
         val family = LocalVoiceSettings.vendor(ctx)
         val key = LocalVoiceSettings.selectedVariant(ctx, family)
+        val pinned = LocalVoiceSettings.selectedModelDir(ctx)
+        val packages = localPackages(ctx)
         val current = when {
-            key.isEmpty() && localPackages(ctx).any { it.key.isEmpty() } -> "local|$family|"
-            key.isNotEmpty() && ModelCatalog.byId("$family/$key") == null -> "local|$family|$key"
+            pinned.isNotBlank() -> "local|$family|$pinned"
+            key.isNotEmpty() && ModelCatalog.byId("$family/$key") == null ->
+                packages.firstOrNull { it.key == key }
+                    ?.let { "local|$family|${it.dir.absolutePath}" } ?: "$family|$key"
+            key.isEmpty() ->
+                packages.firstOrNull { it.key.isEmpty() }
+                    ?.let { "local|$family|${it.dir.absolutePath}" } ?: "$family|"
             else -> "$family|$key"
         }
         AlertDialog.Builder(ctx)
@@ -759,18 +781,21 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             .show()
     }
 
-    /** 本地语音包的操作：设为当前 / 复制路径 / 删除。 */
+    /** 本地语音包的操作：设为当前 / 指定引擎类型 / 复制路径 / 删除。 */
     private fun showLocalPackageActions(ctx: Context, pkg: LocalVoicePackage) {
-        val actions = arrayOf("设为当前引擎", "复制目录路径", "删除此模型")
+        val actions = arrayOf("设为当前引擎", "更换识别引擎类型", "复制目录路径", "删除此模型")
+        val engine = VoiceModels.family(pkg.familyId)?.label?.substringBefore("（") ?: pkg.familyId
         AlertDialog.Builder(ctx)
             .setTitle(pkg.label)
             .setMessage(
                 "目录：${displayPath(ctx, pkg.dir.absolutePath)}\n" +
-                    "占用：${formatMiB(pkg.sizeBytes)}",
+                    "占用：${formatMiB(pkg.sizeBytes)}\n" +
+                    "识别引擎：$engine",
             ).setItems(actions) { _, which ->
                 when (which) {
                     0 -> onEngineSelected(ctx, localValue(pkg))
-                    1 -> copyPath(ctx, pkg.dir.absolutePath)
+                    1 -> showFamilyPickerForPackage(ctx, pkg)
+                    2 -> copyPath(ctx, pkg.dir.absolutePath)
                     else -> confirmDelete(
                         ctx,
                         listOf(
@@ -784,6 +809,27 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     )
                 }
             }.setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * 目录名没有官方包名特征时，文件组又可能多个家族共用（SenseVoice / FireRedASR /
+     * TeleSpeech 都是 tokens.txt + model.onnx），自动推断未必准确。这里让用户直接指定，
+     * 保证 voice 里的每一套模型都能作为独立引擎被选中。
+     */
+    private fun showFamilyPickerForPackage(ctx: Context, pkg: LocalVoicePackage) {
+        val families = VoiceModels.FAMILIES
+        AlertDialog.Builder(ctx)
+            .setTitle("选择这套模型的识别引擎")
+            .setItems(families.map { it.label }.toTypedArray()) { _, which ->
+                val f = families[which]
+                LocalVoiceSettings.setVendor(ctx, f.id)
+                LocalVoiceSettings.setSelectedVariant(ctx, f.id, "")
+                LocalVoiceSettings.setSelectedModelDir(ctx, pkg.dir.absolutePath)
+                toast(ctx, "已设为 ${f.label.substringBefore("（")}")
+                refresh(ctx)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
 
@@ -1274,6 +1320,57 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     }
 
     /**
+     * 「模型驻留内存 → 自定义空闲时间」：填入任意分钟数，写入与预设档相同的
+     * loc.<family>.keep_alive（>0 即空闲 N 分钟后卸载），离线与流式引擎都按这个值调度。
+     */
+    private fun showCustomKeepAliveDialog(ctx: Context) {
+        val family = LocalVoiceSettings.vendor(ctx)
+        val current = LocalVoiceSettings.keepAliveMinutes(ctx, family)
+        val initial = if (current > 0) current.toString() else "10"
+        val max = LocalVoiceSettings.MAX_CUSTOM_KEEP_ALIVE_MINUTES
+        val density = ctx.resources.displayMetrics.density
+        val pad = (20 * density).toInt()
+        val input =
+            EditText(ctx).apply {
+                inputType = InputType.TYPE_CLASS_NUMBER
+                setText(initial)
+                setSelection(initial.length)
+                hint = "1 – $max"
+            }
+        val container =
+            LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(pad, pad / 2, pad, 0)
+                addView(
+                    input,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
+            }
+        AlertDialog.Builder(ctx)
+            .setTitle("自定义空闲时间")
+            .setMessage(
+                "最后一次语音识别结束后，模型空闲指定分钟数再自动卸载；期间再次说话会重新计时。" +
+                    "\n可填 1 – $max 分钟。",
+            )
+            .setView(container)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val minutes = input.text.toString().trim().toIntOrNull()
+                if (minutes == null || minutes !in 1..max) {
+                    toast(ctx, "请输入 1 – $max 之间的分钟数")
+                } else {
+                    LocalVoiceSettings.setKeepAliveMinutes(ctx, family, minutes)
+                    refresh(ctx)
+                    toast(ctx, "已设为空闲 $minutes 分钟后卸载")
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
      * 界面上只显示短路径，避免 Android/data/…/files/rime/voice/… 一整串把设置项撑成好几行；
      * 复制到剪贴板的仍是完整绝对路径。
      */
@@ -1366,11 +1463,18 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 }
         }
         powerSavePreference?.isChecked = LocalVoiceSettings.isPowerSave(ctx)
-        val keepAlive = LocalVoiceSettings.keepAliveMinutes(ctx, family).toString()
+        val keepAliveMinutes = LocalVoiceSettings.keepAliveMinutes(ctx, family)
+        val keepAlive = keepAliveMinutes.toString()
         keepAlivePreference?.apply {
-            val v = if (keepAlive in KEEP_ALIVE_VALUES) keepAlive else "-1"
+            // 自定义分钟数不在预设档位里：选中态落在「自定义…」入口，副标题显示实际数值。
+            val v = if (keepAlive in KEEP_ALIVE_VALUES) keepAlive else KEEP_ALIVE_CUSTOM
             value = v
-            summary = "当前：${KEEP_ALIVE_LABELS[KEEP_ALIVE_VALUES.indexOf(v)]}"
+            summary =
+                if (v == KEEP_ALIVE_CUSTOM) {
+                    "当前：自定义 · 空闲 $keepAliveMinutes 分钟后卸载"
+                } else {
+                    "当前：${KEEP_ALIVE_LABELS[KEEP_ALIVE_VALUES.indexOf(v)]}"
+                }
         }
         unloadDelayPreference?.apply {
             isVisible = keepAlive == LocalVoiceSettings.MODE_FOLLOW_KEYBOARD.toString()
@@ -1419,6 +1523,12 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
 
     /** 只显示已检测到的模型名称；没有可用模型时显示「当前：空」。 */
     private fun buildEngineSummary(ctx: Context, family: String): String {
+        val pinned = LocalVoiceSettings.selectedModelDir(ctx)
+        if (pinned.isNotBlank()) {
+            val pkg = localPackages(ctx).firstOrNull { it.dir.absolutePath == pinned }
+            val engine = VoiceModels.family(family)?.label?.substringBefore("（") ?: family
+            return "当前：$engine · ${pkg?.dir?.name ?: File(pinned).name}"
+        }
         val key = LocalVoiceSettings.selectedVariant(ctx, family)
         val variant = ModelCatalog.VARIANTS.firstOrNull { it.familyId == family && it.key == key }
         val localSelected = localPackages(ctx).firstOrNull { it.familyId == family && it.key == key }
@@ -1443,8 +1553,13 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             } else {
                 append("\n识别使用应用私有目录；可在「模型存放位置」切换到使用者资料夹\n")
             }
+            val pinned = LocalVoiceSettings.selectedModelDir(ctx)
             val selected = LocalVoiceSettings.selectedVariant(ctx, familyId)
-            if (selected.isNotBlank()) append("当前模型：$familyId/$selected\n")
+            if (pinned.isNotBlank()) {
+                append("当前模型目录：${displayPath(ctx, pinned)}\n")
+            } else if (selected.isNotBlank()) {
+                append("当前模型：$familyId/$selected\n")
+            }
             if (status?.ready == true) {
                 append(getString(R.string.local_asr_model_ready))
                 status.resolved?.dir?.let { append("\n检测到模型：${displayPath(ctx, it.absolutePath)}") }
@@ -1484,6 +1599,8 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         const val KEY_KEEP_ALIVE = "lv_keep_alive"
         const val KEY_POWER_SAVE = "lv_power_save"
         const val KEY_UNLOAD_DELAY = "lv_unload_delay"
+        /** 「自定义空闲时间」只是 ListPreference 的入口值，真实分钟数仍存进 keep_alive。 */
+        const val KEEP_ALIVE_CUSTOM = "custom"
         const val KEY_TRANSLATE = "lv_translate"
         const val KEY_TRANSLATE_DIRECTION = "lv_translate_direction"
         const val KEY_TRANSLATE_PACKS = "lv_translate_packs"
@@ -1518,7 +1635,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             "跟随输入法简/繁开关",
         )
         val CONVERSION_SHORT = CONVERSION_LABELS
-        val KEEP_ALIVE_VALUES = arrayOf("-1", "-2", "0", "5", "15", "30")
+        val KEEP_ALIVE_VALUES = arrayOf("-1", "-2", "0", "5", "15", "30", KEEP_ALIVE_CUSTOM)
         val KEEP_ALIVE_LABELS = arrayOf(
             "常驻内存（最快）",
             "跟随键盘：打开时预加载 / 关闭后延迟卸载",
@@ -1526,6 +1643,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             "空闲 5 分钟后卸载",
             "空闲 15 分钟后卸载",
             "空闲 30 分钟后卸载",
+            "自定义空闲时间…（自己填分钟数）",
         )
         val UNLOAD_DELAY_VALUES = arrayOf("1", "3", "5", "10", "30")
         val UNLOAD_DELAY_LABELS = arrayOf(

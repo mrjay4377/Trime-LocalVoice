@@ -93,6 +93,9 @@ object ModelInstaller {
         if (LocalVoiceSettings.selectedVariant(context, variant.familyId) == variant.key) {
             LocalVoiceSettings.setSelectedVariant(context, variant.familyId, "")
         }
+        if (LocalVoiceSettings.selectedModelDir(context) == dir.absolutePath) {
+            LocalVoiceSettings.setSelectedModelDir(context, "")
+        }
         val result = runCatching { !dir.exists() || dir.deleteRecursively() }.getOrDefault(false)
         writeInstalledIndex(context)
         return result
@@ -250,6 +253,11 @@ object ModelInstaller {
                 LocalVoiceSettings.setSelectedVariant(app, family.id, "")
             }
         }
+        // 选中的手动模型目录被删掉时一并清空，否则 status() 会一直尝试一个不存在的路径。
+        val pinned = LocalVoiceSettings.selectedModelDir(app)
+        if (pinned.isNotBlank() && !File(pinned).isDirectory) {
+            LocalVoiceSettings.setSelectedModelDir(app, "")
+        }
         writeInstalledIndex(app)
         return freed
     }
@@ -271,17 +279,17 @@ object ModelInstaller {
                     flatRoot = true,
                 )
             }
-            val parent = model.dir.parentFile?.name
-            val byParent = parent?.let { VoiceModels.family(it)?.id }
-            val names = model.dir.listFiles()
-                ?.filter { it.isFile }
-                ?.map { it.name.lowercase(Locale.ROOT) }
-                ?.toSet()
-                .orEmpty()
-            val byFiles = VoiceModels.FAMILIES.firstOrNull { family ->
-                family.groups.all { group -> group.any { it.lowercase(Locale.ROOT) in names } }
-            }?.id
-            val familyId = byParent ?: byFiles ?: fallbackFamily
+            val byParent = model.dir.parentFile?.name?.let { VoiceModels.family(it)?.id }
+            // 按目录名（官方包名特征词）区分多套引擎。sensevoice / firered_asr / telespeech
+            // 的文件组完全相同，只靠文件推断会一律落到第一个家族，用户就「只能识别一个引擎」。
+            val byName = VoiceModels.inferFamilyByName(model.dir)
+            val byFiles = VoiceModels.inferFamilyByFiles(model.dir)
+            val familyId = byParent
+                ?: byName
+                // 目录名判不出时，优先保留用户当前选中的引擎，再退到文件推断的第一个候选。
+                ?: byFiles.firstOrNull { it == fallbackFamily }
+                ?: byFiles.firstOrNull()
+                ?: fallbackFamily
             LocalVoicePackage(
                 familyId = familyId,
                 key = model.dir.name,

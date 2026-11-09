@@ -13,7 +13,11 @@ import android.content.Context
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
 import android.inputmethodservice.InputMethodService
 import android.os.Build
 import android.os.Bundle
@@ -54,6 +58,9 @@ import com.osfans.trime.data.theme.ThemeManager
 import com.osfans.trime.data.theme.ThemeScope
 import com.osfans.trime.ime.composition.CandidatesView
 import com.osfans.trime.ime.keyboard.InputFeedbackManager
+import com.osfans.trime.ime.keyboard.KeyboardLayoutMode
+import com.osfans.trime.ime.keyboard.KeyboardLayoutState
+import com.osfans.trime.ime.voice.LocalVoiceSettings
 import com.osfans.trime.ime.voice.VoiceLifecycle
 import com.osfans.trime.receiver.RimeIntentReceiver
 import com.osfans.trime.util.any
@@ -482,8 +489,53 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     }
 
     private val inputViewLocation = intArrayOf(0, 0)
+    private val floatingBounds = Rect()
+    private var transparentBackdrop = false
+    private var savedBackdrop: Drawable? = null
+
+    /**
+     * 咩版式悬浮键盘的窗口底色（v51）。
+     *
+     * IME 窗口是 MATCH_PARENT 全屏的，悬浮时卡片之外必须能透出后面的应用，
+     * 所以把窗口底色清成透明；退出悬浮时**精确还原**原先的 drawable（可能是 null），
+     * 不能按主题重新取一份 —— 否则普通模式下不透明的 windowBackground 会盖住上半屏。
+     */
+    fun setInputWindowBackdropTransparent(transparent: Boolean, force: Boolean = false) {
+        if (!force && transparentBackdrop == transparent) return
+        val win = window?.window ?: return
+        if (transparent) {
+            savedBackdrop = win.peekDecorView()?.background
+            win.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            transparentBackdrop = true
+        } else {
+            win.setBackgroundDrawable(savedBackdrop)
+            transparentBackdrop = false
+        }
+    }
+
+    /** 模式或几何变化后刷新窗口底色与可触摸区域；decorView.requestLayout 会触发 onComputeInsets。 */
+    fun applyFloatingWindowMode() {
+        val floating = KeyboardLayoutState.mode() == KeyboardLayoutMode.FLOATING
+        setInputWindowBackdropTransparent(floating)
+        if (::decorView.isInitialized) decorView.requestLayout()
+    }
 
     override fun onComputeInsets(outInsets: Insets) {
+        val floating =
+            inputDeviceManager.useVirtualKeyboard &&
+                inputView?.getFloatingKeyboardBoundsInWindow(floatingBounds) == true
+        if (floating) {
+            // 悬浮卡片浮在应用内容之上：不顶起输入框，只有卡片（含编码栏与角条）接收触摸，
+            // 其余区域穿透给下面的应用，这样键盘拖到屏幕中间时聊天内容仍可见、可点。
+            outInsets.apply {
+                contentTopInsets = decorView.height
+                visibleTopInsets = decorView.height
+                touchableInsets = Insets.TOUCHABLE_INSETS_REGION
+                touchableRegion.set(floatingBounds)
+                inputView?.addResizeHandlesToTouchableRegion(touchableRegion)
+            }
+            return
+        }
         if (inputDeviceManager.useVirtualKeyboard) {
             inputView?.keyboardView?.getLocationInWindow(inputViewLocation)
             outInsets.apply {
@@ -619,27 +671,53 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     }
 
     /**
-     * 当前 Rime 是否处于繁体输出状态，供本地语音「跟随输入法简/繁」档位读取。
+     * 当前输入法是否处于繁体输出状态，供本地语音「跟随输入法简/繁开关」档位读取。
      *
-     * librime 对**未定义**的 option 一律返回 false（见 rime_api_impl.h 中
-     * `is_simplified = get_option("simplification")`）。若直接写
-     * `traditional || !simplification`，方案里没有 simplification 开关时就会恒为 true，
-     * 表现为「跟随档永远输出繁体」。因此先查当前方案的 switches，确认开关真实存在再取值；
-     * 两种开关都没有时按简体处理（与键盘默认显示「汉字」一致）。
+     * 旧实现只认 simplification / traditional 两种 option，且要求它们出现在当前方案的
+     * switches 里。但预设的 luna_pinyin_simp 用的是 zh_simp、luna_pinyin_fluency 根本没有
+     * switches，主题里的简/繁键还可能 toggle 任意名字的 option —— 于是恒返回 false，
+     * 「跟随」档永远输出简体。判定顺序改为：
+     *  1) 键盘简/繁键实际切换的 option（由 handleSwitchCharset 记录，最贴合用户看到的开关）；
+     *  2) 当前方案**确实声明过**的常见简/繁 option；
+     *  3) native status 的 isTraditional 兜底。
+     * librime 对未定义 option 恒返回 false，所以第 2 步只采信声明过的开关，
+     * 也不能写 `!isSimplified`（未定义时同样是 false，会把简体误判成繁体）。
      */
     val isTraditionalMode: Boolean
         get() = runCatching {
             if (!::rime.isInitialized) return@runCatching false
+            val remembered = LocalVoiceSettings.charsetOption(this)
+            val rememberedTraditionalWhenOn = LocalVoiceSettings.charsetTraditionalWhenOn(this)
             rime.run {
-                val names = currentSchema().switches
+                if (remembered.isNotBlank()) {
+                    val value = getRuntimeOption(remembered)
+                    return@run if (rememberedTraditionalWhenOn) value else !value
+                }
+                val declared = schemaCached.switches
                     .flatMap { listOf(it.name) + it.options }
                     .filter { it.isNotBlank() }
                     .toSet()
-                when {
-                    "simplification" in names -> !getRuntimeOption("simplification")
-                    "traditional" in names -> getRuntimeOption("traditional")
-                    else -> false
+                // option 名 → 该 option 为 true 时是否输出繁体
+                val known = listOf(
+                    "traditional" to true,
+                    "zh_hant" to true,
+                    "zh_hant_tw" to true,
+                    "zh_hant_hk" to true,
+                    "zh_trad" to true,
+                    "hant" to true,
+                    "s2t" to true,
+                    "simplification" to false,
+                    "zh_simp" to false,
+                    "zh_hans" to false,
+                    "simplified" to false,
+                    "hans" to false,
+                )
+                for ((name, traditionalWhenOn) in known) {
+                    if (name !in declared) continue
+                    val value = getRuntimeOption(name)
+                    return@run if (traditionalWhenOn) value else !value
                 }
+                statusCached.isTraditional
             }
         }.getOrDefault(false)
 

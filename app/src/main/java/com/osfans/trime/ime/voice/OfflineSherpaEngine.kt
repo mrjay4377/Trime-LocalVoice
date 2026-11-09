@@ -178,8 +178,9 @@ internal class SherpaOfflineManager {
         mutex.withLock {
             val cached = cachedRecognizer
             if (cached != null && cachedKey == key) {
-                unloadJob?.cancel()
-                unloadJob = null
+                // 已加载时不要再取消待执行的空闲卸载：预加载（设置页预热）在任意档位都会触发，
+                // 无脑 cancel 会让「空闲 N 分钟后卸载」的计时凭空消失、模型永久驻留。
+                // 「跟随键盘」档的取消由 VoiceLifecycle.onKeyboardShown 显式完成。
                 return@withLock
             }
             cached?.release()

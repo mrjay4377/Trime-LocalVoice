@@ -58,6 +58,10 @@ object VoiceLifecycle {
             val (config, key) = OfflineSherpaEngine.buildConfig(ctx, family, model)
             if (manager.isLoaded(key)) return@runCatching
             manager.preload(config, key)
+            // 预加载也算一次「使用」：从这里开始计空闲时间，避免只预热不识别时
+            // 自定义（或 5/15/30 预设）档的模型一直留在内存里。识别结束会重新计时。
+            val minutes = LocalVoiceSettings.keepAliveMinutes(ctx, family)
+            if (minutes > 0) manager.scheduleUnload(minutes.toLong() * 60_000L)
         }.onFailure { Timber.w(it, "voice model preload failed") }
     }
 

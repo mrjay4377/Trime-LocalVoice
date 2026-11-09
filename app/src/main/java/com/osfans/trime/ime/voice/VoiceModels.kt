@@ -13,6 +13,7 @@ import com.osfans.trime.core.data.DataManager
 import com.osfans.trime.core.data.UserDataManager
 import timber.log.Timber
 import java.io.File
+import java.util.Locale
 
 /** 每个离线家族需要的文件组；组内是可接受的文件名别名，第一个别名作为 config 键。 */
 data class VoiceFamily(
@@ -139,6 +140,51 @@ object VoiceModels {
     )
 
     fun family(id: String): VoiceFamily? = FAMILIES.firstOrNull { it.id == id }
+
+    /**
+     * 目录名里的引擎特征词。官方模型包解压出来的目录名基本都带这些词，
+     * 用它区分「文件组完全相同」的 sensevoice / firered_asr / telespeech。
+     * 顺序按特异性排列：paraformer 要排在泛化的 streaming / transducer 之前。
+     */
+    private val FAMILY_NAME_HINTS: List<Pair<String, List<String>>> = listOf(
+        "qwen3_asr" to listOf("qwen3", "qwen-3", "qwen"),
+        "funasr_nano" to listOf("funasr", "fun-asr"),
+        STREAMING_PARAFORMER_FAMILY to listOf("paraformer"),
+        STREAMING_FAMILY to listOf("x-asr", "xasr", "zipformer", "transducer", "480ms"),
+        "parakeet" to listOf("parakeet"),
+        "firered_asr" to listOf("firered", "fire-red", "fire_red"),
+        "telespeech" to listOf("telespeech", "tele-speech"),
+        "sensevoice" to listOf("sensevoice", "sense-voice", "sense_voice"),
+    )
+
+    /** 结合当前目录、父目录（家族目录名）与再上一层目录名推断引擎家族；判不出返回 null。 */
+    fun inferFamilyByName(dir: File): String? {
+        val haystack = listOfNotNull(
+            dir.name,
+            dir.parentFile?.name,
+            dir.parentFile?.parentFile?.name,
+        ).joinToString(" ").lowercase(Locale.ROOT)
+        return FAMILY_NAME_HINTS.firstOrNull { (_, hints) -> hints.any { it in haystack } }?.first
+    }
+
+    /**
+     * 按目录里的文件组合推断可能的家族（可能多个）。
+     * 只需「每个必需文件组至少命中一个别名」，不要求目录结构符合 voice/<家族>/<变体>。
+     */
+    fun inferFamilyByFiles(dir: File): List<String> {
+        val names = dir.listFiles()
+            ?.filter { it.isFile && it.length() > 0 }
+            ?.map { it.name.lowercase(Locale.ROOT) }
+            ?.toSet()
+            .orEmpty()
+        if (names.isEmpty()) return emptyList()
+        // 必需文件多的家族先判，避免把 Qwen3 / Paraformer 这类多件套误判成 SenseVoice。
+        return FAMILIES.sortedByDescending { it.groups.size }
+            .filter { family ->
+                family.groups.all { group -> group.any { it.lowercase(Locale.ROOT) in names } }
+            }
+            .map { it.id }
+    }
 
     /**
      * 是否已获得「所有文件访问权限」：Android 11+ 分区存储下，只有持此权限，
@@ -275,15 +321,16 @@ object VoiceModels {
 
     private data class Attempt(val dir: File, val paths: Map<String, String>?, val missing: List<String>)
 
-    private fun attempt(dir: File, family: VoiceFamily): Attempt {
-        val index = mutableMapOf<String, File>()
-        collect(dir, index, 0)
+    private fun match(
+        index: Map<String, File>,
+        family: VoiceFamily,
+    ): Pair<Map<String, String>?, List<String>> {
         val paths = LinkedHashMap<String, String>()
         val missing = mutableListOf<String>()
         for (group in family.groups) {
             var found: File? = null
             for (alias in group) {
-                val candidate = index[alias.lowercase()]
+                val candidate = index[alias.lowercase(Locale.ROOT)]
                 if (candidate != null) {
                     found = candidate
                     break
@@ -295,18 +342,50 @@ object VoiceModels {
                 paths[group[0]] = found.absolutePath
             }
         }
-        return Attempt(dir, if (missing.isEmpty()) paths else null, missing)
+        return (if (missing.isEmpty()) paths else null) to missing
     }
 
-    private fun collect(dir: File, index: MutableMap<String, File>, depth: Int) {
-        if (depth > 3) return
+    /**
+     * 解析一个目录是否含指定家族的完整模型。
+     *
+     * 原实现把整个目录树（含所有子目录）的文件合并成一张索引，voice 下放多套引擎时
+     * 会拿 A 包的 tokens.txt 拼 B 包的 model.onnx，或者永远只命中扫描到的第一套。
+     * 现在：先只看本目录直属文件；不够时逐个**单独**尝试子目录（子目录内部允许再嵌一层），
+     * 绝不跨不同子目录拼凑，多个引擎才能各归各的。
+     */
+    private fun attempt(dir: File, family: VoiceFamily): Attempt {
+        val direct = mutableMapOf<String, File>()
+        collect(dir, direct, 0, maxDepth = 0)
+        val (directPaths, directMissing) = match(direct, family)
+        if (directPaths != null) return Attempt(dir, directPaths, emptyList())
+
+        var best = Attempt(dir, null, directMissing)
+        dir.listFiles()
+            ?.filter { it.isDirectory && !it.name.startsWith(".") && it.name != "__MACOSX" }
+            ?.forEach { sub ->
+                val index = mutableMapOf<String, File>()
+                collect(sub, index, 0, maxDepth = 2)
+                val (paths, missing) = match(index, family)
+                if (paths != null) return Attempt(sub, paths, emptyList())
+                if (missing.size < best.missing.size) best = Attempt(sub, null, missing)
+            }
+        return best
+    }
+
+    private fun collect(
+        dir: File,
+        index: MutableMap<String, File>,
+        depth: Int,
+        maxDepth: Int = 3,
+    ) {
+        if (depth > maxDepth) return
         val children = dir.listFiles() ?: return
         for (file in children) {
             if (file.isDirectory) {
                 if (file.name.startsWith(".") || file.name == "__MACOSX") continue
-                collect(file, index, depth + 1)
+                collect(file, index, depth + 1, maxDepth)
             } else if (file.isFile && file.length() > 0) {
-                val key = file.name.lowercase()
+                val key = file.name.lowercase(Locale.ROOT)
                 if (!index.containsKey(key)) index[key] = file
             }
         }
@@ -320,13 +399,46 @@ object VoiceModels {
     fun status(context: Context, familyId: String): VoiceModelStatus {
         val family = family(familyId) ?: FAMILIES.first()
         val root = ensureRoot(context)
-        // 通过「模型列表」安装的模型有精确目录，优先使用，避免多个变体的同名文件混用。
+
+        // 最高优先级：用户在「语音识别引擎」里手动选中的那套模型目录（绝对路径）。
+        // 用户把多个引擎的解压包直接放进 voice 时，靠这条才能切换，不再永远命中扫描到的第一套。
+        val pinned = LocalVoiceSettings.selectedModelDir(context)
+        if (pinned.isNotBlank()) {
+            val dir = File(pinned)
+            if (dir.isDirectory) {
+                val result = attempt(dir, family)
+                if (result.paths != null) {
+                    return VoiceModelStatus(
+                        root,
+                        ResolvedVoiceModel(result.dir, result.paths),
+                        emptyList(),
+                        result.dir,
+                    )
+                }
+            }
+        }
+
+        // 通过「下载并安装模型」装的规格模型有精确目录，优先使用，避免多个变体的同名文件混用。
         val selected = LocalVoiceSettings.selectedVariant(context, familyId)
         if (selected.isNotBlank()) {
-            val dir = File(File(root, family.id), selected)
-            val result = attempt(dir, family)
-            if (result.paths != null) {
-                return VoiceModelStatus(root, ResolvedVoiceModel(dir, result.paths), emptyList(), dir)
+            val candidates = LinkedHashSet<File>()
+            candidates += File(File(root, family.id), selected)
+            // 兼容旧版：手动包曾把目录名存在 selectedVariant 里，但目录并不在 <family>/ 下。
+            candidateRoots(context).forEach { r ->
+                candidates += File(r, selected)
+                r.listFiles()?.filter { it.isDirectory }?.forEach { candidates += File(it, selected) }
+            }
+            for (dir in candidates) {
+                if (!dir.isDirectory) continue
+                val result = attempt(dir, family)
+                if (result.paths != null) {
+                    return VoiceModelStatus(
+                        root,
+                        ResolvedVoiceModel(result.dir, result.paths),
+                        emptyList(),
+                        result.dir,
+                    )
+                }
             }
         }
         var best: Attempt? = null

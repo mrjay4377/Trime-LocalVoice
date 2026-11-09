@@ -257,4 +257,16 @@
     <string name="word_segment">分词</string>
     <string name="star_success">收藏成功</string>
     <string name="ignore_system_gesture_insets">忽略系统手势边衬区</string>
+    <string name="one_hand_keyboard_mode">单手键盘模式</string>
+    <string name="floating_keyboard">悬浮键盘</string>
+    <string name="keyboard_layout_normal">普通键盘</string>
+    <string name="one_hand_left">左手</string>
+    <string name="one_hand_right">右手</string>
+    <string name="keyboard_layout_on">已开启</string>
+    <string name="floating_keyboard_tip">悬浮键盘已开启：按住左侧四向箭头即可移动，或按住顶部任意位置约 0.3 秒变蓝后拖动；拖动两下角蓝色角条缩放</string>
+    <string name="floating_keyboard_off">已退出悬浮键盘</string>
+    <string name="floating_keyboard_handle">缩放键盘尺寸</string>
+    <string name="floating_keyboard_drag_handle">按住拖动悬浮键盘</string>
+    <string name="floating_keyboard_reset">已还原悬浮键盘位置与尺寸</string>
+    <string name="keyboard_style">键盘样式</string>
 </resources>

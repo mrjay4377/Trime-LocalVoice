@@ -50,6 +50,9 @@ import splitties.systemservices.clipboardManager
 import splitties.systemservices.inputMethodManager
 import timber.log.Timber
 
+private val ONE_HAND_OPTIONS =
+    setOf("_one_hand_mode_1", "_one_hand_mode_2", "_one_hand_mode_3")
+
 class CommonKeyboardActionListener(override val di: DI) : DIAware {
 
     private val context: ContextThemeWrapper by instance()
@@ -228,6 +231,52 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
 
             private fun handleSwitchCharset(action: KeyAction) {
                 val option = action.toggle.ifEmpty { return }
+
+                // 主题预设的 one_hand_switch_*（「，」「？」长按）不是 Rime 的简繁开关，
+                // 直接切到本地键盘布局状态，与宫格菜单里的「单手键盘模式」保持同步。
+                if (option in ONE_HAND_OPTIONS) {
+                    val current = KeyboardLayoutState.mode()
+                    val next =
+                        when (option) {
+                            "_one_hand_mode_1" ->
+                                if (current == KeyboardLayoutMode.ONE_HAND_LEFT) {
+                                    KeyboardLayoutMode.NORMAL
+                                } else {
+                                    KeyboardLayoutMode.ONE_HAND_LEFT
+                                }
+                            "_one_hand_mode_2" ->
+                                if (current == KeyboardLayoutMode.ONE_HAND_RIGHT) {
+                                    KeyboardLayoutMode.NORMAL
+                                } else {
+                                    KeyboardLayoutMode.ONE_HAND_RIGHT
+                                }
+                            else ->
+                                if (current == KeyboardLayoutMode.ONE_HAND_RIGHT) {
+                                    KeyboardLayoutMode.ONE_HAND_LEFT
+                                } else {
+                                    KeyboardLayoutMode.ONE_HAND_RIGHT
+                                }
+                        }
+                    KeyboardLayoutState.setMode(service, next)
+                    Toast.makeText(
+                        service,
+                        when (next) {
+                            KeyboardLayoutMode.ONE_HAND_LEFT -> R.string.one_hand_left
+                            KeyboardLayoutMode.ONE_HAND_RIGHT -> R.string.one_hand_right
+                            else -> R.string.keyboard_layout_normal
+                        },
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    return
+                }
+
+                // 记下键盘「简/繁」键真正切换的 option 名与语义。主题和方案的命名经常不一致
+                // （主题写 simplification，方案却用 zh_simp / zh_hant），语音的「跟随」档
+                // 只有跟随这个按键本身，才不会永远判成简体。
+                action.traditionalWhenToggleOn()?.let { traditionalWhenOn ->
+                    LocalVoiceSettings.setCharsetOption(service, option)
+                    LocalVoiceSettings.setCharsetTraditionalWhenOn(service, traditionalWhenOn)
+                }
 
                 rime.launchOnReady { api ->
                     service.lifecycleScope.launch {

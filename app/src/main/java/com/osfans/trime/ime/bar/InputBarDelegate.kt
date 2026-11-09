@@ -131,6 +131,12 @@ class InputBarDelegate(override val di: DI) :
         }
     }
 
+    /**
+     * 悬浮工具栏的专用四向箭头拖动手柄；外层长按容器用它排除「按住即拖」区域。
+     * 非悬浮或当前显示的是候选栏 / 剪贴栏时返回 null，长按拖动照常生效。
+     */
+    fun floatingDragHandle(): View? = alwaysUi.dragHandleView
+
     private val alwaysUi: AlwaysUi by lazy {
         AlwaysUi(context, scope) { action ->
             // A touch that started on the toolbar can finish after candidates replace it.

@@ -1,0 +1,46 @@
+<!--
+  ~ SPDX-FileCopyrightText: 2015 - 2025 Rime community
+  ~ SPDX-License-Identifier: GPL-3.0-or-later
+  -->
+
+<!-- 悬浮键盘专用拖动手柄：中心实心圆点 + 上下左右四向箭头，按住即可移动键盘。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- 中心圆点 -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M12,8.8 C10.233,8.8 8.8,10.233 8.8,12 C8.8,13.767 10.233,15.2 12,15.2 C13.767,15.2 15.2,13.767 15.2,12 C15.2,10.233 13.767,8.8 12,8.8 Z" />
+
+    <!-- 圆点到四个箭头的连杆 -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M10.9,5.5h2.2v4h-2.2z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M10.9,14.5h2.2v4h-2.2z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M5.5,10.9h4v2.2h-4z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M14.5,10.9h4v2.2h-4z" />
+
+    <!-- 四个方向的实心三角箭头 -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M12,1L15.6,6.6H8.4Z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M12,23L8.4,17.4H15.6Z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M1,12L6.6,8.4V15.6Z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M23,12L17.4,15.6V8.4Z" />
+
+</vector>

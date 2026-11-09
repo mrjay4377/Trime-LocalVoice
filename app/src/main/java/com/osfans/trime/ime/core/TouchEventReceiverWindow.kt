@@ -10,6 +10,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.widget.PopupWindow
+import kotlin.math.roundToInt
 
 class TouchEventReceiverWindow(
     private val contentView: View,
@@ -47,10 +48,14 @@ class TouchEventReceiverWindow(
         }
     }
 
+    fun isShowing(): Boolean = isWindowShowing
+
     fun show() {
         val (x, y) = cachedLocation.also { contentView.getLocationInWindow(it) }
-        val width = contentView.width
-        val height = contentView.height
+        // 悬浮时预编辑栏会跟随卡片缩放：触摸窗口必须用缩放后的视觉尺寸，
+        // 否则编码区右半边点不到、左半边多出一截透明拦截区。
+        val width = (contentView.width * contentView.scaleX).roundToInt()
+        val height = (contentView.height * contentView.scaleY).roundToInt()
         showAt(x, y, width, height)
     }
 

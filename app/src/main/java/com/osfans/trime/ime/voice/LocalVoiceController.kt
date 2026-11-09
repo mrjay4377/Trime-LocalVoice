@@ -152,12 +152,11 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
                     }
                     // 上屏前按设置做离线简繁转换；转换失败时 ChineseConverter 原样返回。
                     val mode = LocalVoiceSettings.outputConversion(service)
-                    val original = ChineseConverter.convert(
-                        service, text, mode, service.isTraditionalMode,
-                    )
+                    val traditional = service.isTraditionalMode
+                    val original = ChineseConverter.convert(service, text, mode, traditional)
                     Timber.i(
-                        "LocalVoice result %d -> %d chars, mode=%s (%.1fs audio)",
-                        text.length, original.length, mode, session.seconds,
+                        "LocalVoice result %d -> %d chars, mode=%s, traditional=%s (%.1fs audio)",
+                        text.length, original.length, mode, traditional, session.seconds,
                     )
 
                     fun deliver(output: String, fallbackNotice: String?) {
