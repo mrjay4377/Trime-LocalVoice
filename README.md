@@ -47,6 +47,8 @@ export ANDROID_HOME=<path-to-android-sdk>
 python scripts/repack_apk.py <unsigned.apk> <signed.apk>   # zipalign + debug 重签 v1/v2/v3
 ```
 
+> 注：子模块 `app/src/main/jni/librime-lua-deps` 指向本项目的 [fork](https://github.com/mrjay4377/librime-lua)（`trime-localvoice` 分支），内含一个 Android `minSdk 21` 缺少 `fseeko/ftello` 的编译兼容补丁；上游原仓库为 `hchunhui/librime-lua`。`git clone --recursive` 会自动取得该补丁，无需手动处理。
+
 更完整的分支基线、改动清单与构建说明见 [LOCALVOICE.md](LOCALVOICE.md)。
 
 ## 上游与致谢
