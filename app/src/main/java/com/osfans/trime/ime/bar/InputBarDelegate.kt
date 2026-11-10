@@ -289,6 +289,15 @@ class InputBarDelegate(override val di: DI) :
             evalAlwaysUiState()
             ClipboardHelper.addOnUpdateListener(onClipboardUpdateListener)
             syncToolbarOptionStates()
+            addOnAttachStateChangeListener(
+                object : View.OnAttachStateChangeListener {
+                    override fun onViewAttachedToWindow(v: View) = Unit
+
+                    override fun onViewDetachedFromWindow(v: View) {
+                        removeOnAttachStateChangeListener(this)
+                    }
+                },
+            )
         }
     }
 

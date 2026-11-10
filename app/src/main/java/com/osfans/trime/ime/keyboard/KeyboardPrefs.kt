@@ -25,4 +25,12 @@ object KeyboardPrefs {
         val metrics = resources.displayMetrics
         return metrics.widthPixels / metrics.density > WIDE_SCREEN_WIDTH_DP
     }
+
+    /**
+     * 设备是否为宽屏（平板 / 折叠屏内屏）。与上面的 isWideScreen() 不同，这里用
+     * smallestScreenWidthDp：它不随旋屏变化，才能稳定判断「这台设备是否本来就该双手用」。
+     * 单手模式据此在宽屏与横屏上自动回到普通键盘。
+     */
+    fun Context.isWideScreenDevice(): Boolean =
+        resources.configuration.smallestScreenWidthDp >= WIDE_SCREEN_WIDTH_DP
 }

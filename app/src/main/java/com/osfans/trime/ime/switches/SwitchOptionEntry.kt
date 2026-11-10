@@ -21,6 +21,7 @@ sealed class SwitchOptionEntry(
             Keyboard,
             ThemeList,
             OneHandMode,
+            OneHandWidth,
             FloatingKeyboard,
         }
     }

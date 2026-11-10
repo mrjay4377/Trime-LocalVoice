@@ -89,6 +89,17 @@ class AlwaysUi(
             contentDescription = ctx.getString(R.string.floating_keyboard_drag_handle)
         }
 
+    /**
+     * 工具栏「更多」按钮之后的模式状态图标：悬浮 / 单手时显示对应图标，普通模式隐藏；
+     * 点击直接关闭当前布局模式（悬浮 / 单手），回到普通全宽键盘。
+     */
+    private val modeButton =
+        ToolButton(ctx, R.drawable.ic_baseline_floating_keyboard_24, scope).apply {
+            visibility = View.GONE
+            // setMode 会派发给 InputView 重排键盘、并让本工具栏隐藏图标，存档（位置 / 单手宽度）保留。
+            setOnClickListener { KeyboardLayoutState.setMode(ctx, KeyboardLayoutMode.NORMAL) }
+        }
+
     /** 供外层长按容器做命中排除：只有悬浮且把手可见时才把它交给对方。 */
     val dragHandleView: View?
         get() = dragButton.takeIf { isFloating() && it.visibility == View.VISIBLE }
@@ -124,8 +135,16 @@ class AlwaysUi(
         add(
             leftMostButton,
             lParams(leftWidth, leftHeight) {
-                // 普通模式下 dragButton 为 GONE，该约束等价于贴父布局左边，外观不变
+                // 普通 / 单手模式下 dragButton 为 GONE，该约束回退到父布局左边；
+                // 普通模式 modeButton 也为 GONE，leftMostButton 与 animator 最终贴父布局左边，外观不变。
                 after(dragButton)
+                centerVertically()
+            },
+        )
+        add(
+            modeButton,
+            lParams(leftWidth, leftHeight) {
+                after(leftMostButton)
                 centerVertically()
             },
         )
@@ -139,7 +158,7 @@ class AlwaysUi(
         add(
             animator,
             lParams(matchConstraints, matchParent) {
-                after(leftMostButton)
+                after(modeButton)
                 before(rightMostButton)
                 endOfParent()
                 centerVertically()
@@ -152,12 +171,34 @@ class AlwaysUi(
     private fun isFloating(): Boolean =
         KeyboardLayoutState.mode() == KeyboardLayoutMode.FLOATING
 
-    /** 工具栏始终完整展开；只在悬浮模式显示最左的四向箭头拖动手柄。 */
-    private fun syncFloatingToolbar() {
-        dragButton.visibility = if (isFloating()) View.VISIBLE else View.GONE
+    /**
+     * 工具栏始终完整展开；同步两件与布局模式相关的事：
+     * 1) 悬浮模式显示最左的四向箭头拖动手柄；
+     * 2) 悬浮 / 单手模式在「更多」按钮之后显示模式状态图标，点击关闭当前模式，普通模式隐藏
+     *    （GONE 后 animator 的约束回退到 leftMostButton 右侧，工具栏外观完全恢复）。
+     */
+    private fun syncLayoutMode() {
+        val floating = isFloating()
+        dragButton.visibility = if (floating) View.VISIBLE else View.GONE
+        when (KeyboardLayoutState.mode()) {
+            KeyboardLayoutMode.FLOATING -> {
+                modeButton.setIcon(R.drawable.ic_baseline_floating_keyboard_24)
+                modeButton.contentDescription = ctx.getString(R.string.floating_keyboard)
+                modeButton.visibility = View.VISIBLE
+            }
+            KeyboardLayoutMode.ONE_HAND_LEFT, KeyboardLayoutMode.ONE_HAND_RIGHT -> {
+                modeButton.setIcon(R.drawable.ic_baseline_one_hand_mode_24)
+                modeButton.contentDescription = ctx.getString(R.string.one_hand_keyboard_mode)
+                modeButton.visibility = View.VISIBLE
+            }
+            KeyboardLayoutMode.NORMAL -> {
+                modeButton.visibility = View.GONE
+                modeButton.contentDescription = null
+            }
+        }
     }
 
-    private val layoutListener: () -> Unit = { syncFloatingToolbar() }
+    private val layoutListener: () -> Unit = { syncLayoutMode() }
 
     init {
         // 只有最左的四向箭头把手负责拖动：其余工具按钮的点击 / 长按、
@@ -206,7 +247,7 @@ class AlwaysUi(
                 }
             },
         )
-        syncFloatingToolbar()
+        syncLayoutMode()
     }
 
     fun updateButtonsStyle(option: String, enabled: Boolean) {
@@ -233,6 +274,7 @@ class AlwaysUi(
     fun refreshColors() {
         leftMostButton.refreshColors()
         dragButton.refreshColors()
+        modeButton.refreshColors()
         hideKeyboardButton.refreshColors()
         buttonsUi.refreshColors()
         clipboardUi.refreshColors()

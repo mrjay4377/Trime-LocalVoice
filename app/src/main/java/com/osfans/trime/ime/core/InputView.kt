@@ -45,6 +45,7 @@ import com.osfans.trime.ime.keyboard.CommonKeyboardActionListener
 import com.osfans.trime.ime.keyboard.KeyboardLayoutMode
 import com.osfans.trime.ime.keyboard.KeyboardLayoutState
 import com.osfans.trime.ime.keyboard.KeyboardPrefs.isLandscapeMode
+import com.osfans.trime.ime.keyboard.KeyboardPrefs.isWideScreenDevice
 import com.osfans.trime.ime.keyboard.KeyboardWindow
 import com.osfans.trime.ime.popup.PopupDelegate
 import com.osfans.trime.ime.symbol.LiquidWindow
@@ -120,6 +121,22 @@ class InputView(
     private val layoutListener: () -> Unit = {
         applyKeyboardLayoutMode()
         service.applyFloatingWindowMode()
+    }
+
+    /** 单手卡片的物理宽度上下限与外侧安全边距（dp），避免按键被压得过窄或贴边误触。 */
+    private companion object {
+        const val ONE_HAND_MIN_WIDTH_DP = 280
+        const val ONE_HAND_MAX_WIDTH_DP = 400
+        const val ONE_HAND_SAFE_PADDING_DP = 8
+    }
+
+    /**
+     * 单手宽度的参考基准：**屏幕短边**。旋屏只交换宽高，短边不变，
+     * 因此同一档位在竖屏 / 横屏 / 折叠屏展开后得到的是同一个物理宽度。
+     */
+    private fun referenceWidthPx(): Int {
+        val metrics = resources.displayMetrics
+        return minOf(metrics.widthPixels, metrics.heightPixels)
     }
 
     /** 悬浮 / 单手模式下整块键盘被裁成圆角卡片，用它同时提供圆角与投影。 */
@@ -540,16 +557,28 @@ class InputView(
      * 悬浮 = 圆角卡片 + 整块等比缩放，缩放交给 scale，布局宽度不变，避免每帧重排按键。
      */
     private fun applyKeyboardLayoutMode() {
-        val mode = KeyboardLayoutState.mode()
+        val savedMode = KeyboardLayoutState.mode()
         val landscape = context.resources.configuration.isLandscape()
+        val wideScreen = context.isWideScreenDevice()
+        // 横屏 / 宽屏设备（平板、折叠屏内屏）本来就是双手场景，单手模式在这些状态下
+        // 按普通键盘排布；存档不动，转回竖屏后仍是用户原来选的单手模式（对齐咩版）。
+        val mode =
+            if (savedMode.isOneHand && (landscape || wideScreen)) {
+                KeyboardLayoutMode.NORMAL
+            } else {
+                savedMode
+            }
         val parentWidth = if (width > 0) width else resources.displayMetrics.widthPixels
-        val oneHandPercent = if (landscape) 0.62f else 0.78f
         val floating = mode == KeyboardLayoutMode.FLOATING
         val card = floating || mode.isOneHand
         // 退出悬浮时清掉可能残留的高亮 / 半截拖动态，避免下次进入时带着上一次的状态。
         if (!floating) inputBarWrapper.resetDragState()
 
+        val safePadding = dp(ONE_HAND_SAFE_PADDING_DP)
         keyboardView.updateLayoutParams<LayoutParams> {
+            // 每次重排都先清掉单手专用边距，避免切回普通 / 悬浮时残留。
+            leftMargin = 0
+            rightMargin = 0
             when (mode) {
                 KeyboardLayoutMode.NORMAL -> {
                     width = matchParent
@@ -558,9 +587,24 @@ class InputView(
                 }
 
                 KeyboardLayoutMode.ONE_HAND_LEFT, KeyboardLayoutMode.ONE_HAND_RIGHT -> {
-                    width = (parentWidth * oneHandPercent).toInt()
+                    // 宽度档位以屏幕短边为基准，再用物理 dp 上下限夹住：旋屏、折叠屏、平板
+                    // 得到的都是「一只拇指够得着」的实际宽度，不会跟着窗口宽度跳变。
+                    val percent = KeyboardLayoutState.oneHandWidthPercent(service)
+                    val minWidth = dp(ONE_HAND_MIN_WIDTH_DP)
+                    val maxWidth =
+                        minOf(
+                            dp(ONE_HAND_MAX_WIDTH_DP),
+                            (parentWidth - safePadding * 2).coerceAtLeast(minWidth),
+                        )
+                    width = (referenceWidthPx() * percent / 100f).roundToInt().coerceIn(minWidth, maxWidth)
                     horizontalBias = if (mode == KeyboardLayoutMode.ONE_HAND_LEFT) 0f else 1f
                     bottomMargin = 0
+                    // 靠屏幕外侧留一点边距，避免最外侧键贴边误触 / 撞系统返回手势。
+                    if (mode == KeyboardLayoutMode.ONE_HAND_LEFT) {
+                        leftMargin = safePadding
+                    } else {
+                        rightMargin = safePadding
+                    }
                 }
 
                 KeyboardLayoutMode.FLOATING -> {
@@ -640,14 +684,19 @@ class InputView(
         } else {
             keyboardView.translationX = 0f
             keyboardView.translationY = 0f
-            // 退出悬浮 / 单手时把编码栏放回普通键盘上方，别留着上一次的位移与缩放。
+            // 单手卡片靠边时把编码栏贴到卡片左上角；普通模式归零（函数内部按模式判断）。
             syncFloatingPreeditPosition()
         }
         keyboardView.requestLayout()
+        if (card && !floating) {
+            // 单手改的是布局宽度，keyboardView.left 要等重新 measure 之后才准确，
+            // 布局完成后再贴一次编码栏，避免切模式那一帧仍停在旧位置。
+            keyboardView.post { syncFloatingPreeditPosition() }
+        }
     }
 
     /**
-     * 悬浮时把预编辑栏（编码串 / 软光标所在）贴到卡片左上角，并跟随拖动与缩放。
+     * 悬浮 / 单手时把预编辑栏（编码串 / 软光标所在）贴到卡片左上角，并跟随拖动与缩放。
      *
      * 布局上它是 keyboardView 的兄弟节点（above + startOfParent），给 keyboardView 加的
      * translation / scale 不会带着它走；不做这一步，悬浮后编码栏仍留在「正常键盘」原位置。
@@ -656,7 +705,11 @@ class InputView(
      */
     private fun syncFloatingPreeditPosition() {
         val root = preedit.ui.root
-        if (KeyboardLayoutState.mode() != KeyboardLayoutMode.FLOATING) {
+        val mode = KeyboardLayoutState.mode()
+        // 单手卡片靠边后编码栏也要跟着卡片左上角；但单手只平移不缩放，
+        // 按键网格是按新宽度重排的，编码文字保持原字号，不像悬浮那样一起缩小。
+        val cardMode = mode == KeyboardLayoutMode.FLOATING || mode.isOneHand
+        if (!cardMode) {
             root.translationX = 0f
             root.translationY = 0f
             root.scaleX = 1f
@@ -664,13 +717,14 @@ class InputView(
             return
         }
         if (keyboardView.width == 0) return
+        val floating = mode == KeyboardLayoutMode.FLOATING
         root.pivotX = 0f
         root.pivotY = 0f
-        root.scaleX = keyboardView.scaleX
+        root.scaleX = if (floating) keyboardView.scaleX else 1f
         root.translationX = keyboardView.left + keyboardView.translationX - root.left
         root.translationY = keyboardView.translationY
         // 悬浮卡片 8dp、按键弹层 24dp，编码区取中间档，避免被卡片圆角 / 阴影压住。
-        root.translationZ = dp(16).toFloat()
+        root.translationZ = if (floating) dp(16).toFloat() else 0f
         preedit.updateTouchReceiverPosition()
     }
 

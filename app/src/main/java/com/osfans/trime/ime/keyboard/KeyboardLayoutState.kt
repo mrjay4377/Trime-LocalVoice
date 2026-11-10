@@ -35,11 +35,23 @@ object KeyboardLayoutState {
     private const val KEY_FLOAT_Y = "float_y"
     private const val KEY_FLOAT_WIDTH = "float_width_percent"
     private const val KEY_FLOAT_HEIGHT = "float_height_percent"
+    private const val KEY_ONE_HAND_WIDTH = "one_hand_width_percent"
 
     /** 悬浮键盘缩放范围，与咩版设置滑块一致。 */
     const val MIN_SIZE_PERCENT = 40
     const val MAX_SIZE_PERCENT = 100
     private const val DEFAULT_SIZE_PERCENT = 90
+
+    /**
+     * 单手键盘宽度档位：占**屏幕短边**的百分比，最终宽度还会被 InputView 用
+     * 280–400dp 的物理上下限夹取，避免大屏上键盘过宽、小屏上按键过窄。
+     * 与悬浮的 40–100 缩放档位完全独立，改这里不会影响已经定型的悬浮手感。
+     */
+    const val MIN_ONE_HAND_WIDTH_PERCENT = 60
+    const val MAX_ONE_HAND_WIDTH_PERCENT = 100
+    const val ONE_HAND_WIDTH_NARROW = 70
+    const val ONE_HAND_WIDTH_STANDARD = 85
+    const val ONE_HAND_WIDTH_WIDE = 100
 
     private val _modeFlow = MutableStateFlow(KeyboardLayoutMode.NORMAL)
     val modeFlow = _modeFlow.asStateFlow()
@@ -112,6 +124,21 @@ object KeyboardLayoutState {
             .putInt(KEY_FLOAT_WIDTH, value)
             .putInt(KEY_FLOAT_HEIGHT, value)
             .apply()
+        dispatchLayoutChange()
+    }
+
+    /** 单手宽度档位（宫格里切换），写入后让 InputView 立刻重排卡片宽度。 */
+    fun oneHandWidthPercent(context: Context): Int =
+        prefs(context).getInt(KEY_ONE_HAND_WIDTH, ONE_HAND_WIDTH_STANDARD)
+            .coerceIn(MIN_ONE_HAND_WIDTH_PERCENT, MAX_ONE_HAND_WIDTH_PERCENT)
+
+    fun setOneHandWidthPercent(
+        context: Context,
+        percent: Int,
+    ) {
+        val value = percent.coerceIn(MIN_ONE_HAND_WIDTH_PERCENT, MAX_ONE_HAND_WIDTH_PERCENT)
+        if (value == oneHandWidthPercent(context)) return
+        prefs(context).edit().putInt(KEY_ONE_HAND_WIDTH, value).apply()
         dispatchLayoutChange()
     }
 

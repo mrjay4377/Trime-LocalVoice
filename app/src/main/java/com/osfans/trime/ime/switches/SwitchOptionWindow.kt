@@ -70,7 +70,7 @@ class SwitchOptionWindow(di: DI) :
                 context.getString(R.string.floating_keyboard)
             }
         // 与咩版一致：最前两项固定为「键盘样式」「方案」，模式切换放在其后。
-        return arrayOf(
+        val entries = mutableListOf<SwitchOptionEntry>(
             SwitchOptionEntry.Static(
                 context.getString(R.string.keyboard_style),
                 R.drawable.ic_baseline_color_lens_24,
@@ -102,6 +102,25 @@ class SwitchOptionWindow(di: DI) :
                 SwitchOptionEntry.Static.Type.Keyboard,
             ),
         )
+        // 单手模式下才出现「键盘宽度」三档，避免普通 / 悬浮模式的宫格被无用项占满。
+        if (mode.isOneHand) {
+            val current = KeyboardLayoutState.oneHandWidthPercent(context)
+            val currentLabel =
+                when {
+                    current <= KeyboardLayoutState.ONE_HAND_WIDTH_NARROW ->
+                        context.getString(R.string.one_hand_width_narrow)
+                    current >= KeyboardLayoutState.ONE_HAND_WIDTH_WIDE ->
+                        context.getString(R.string.one_hand_width_wide)
+                    else -> context.getString(R.string.one_hand_width_standard)
+                }
+            entries += SwitchOptionEntry.Static(
+                context.getString(R.string.one_hand_width) + " · " +
+                    context.getString(R.string.one_hand_width_current, currentLabel),
+                R.drawable.ic_baseline_one_hand_mode_24,
+                SwitchOptionEntry.Static.Type.OneHandWidth,
+            )
+        }
+        return entries.toTypedArray()
     }
 
     var popupMenu: PopupMenu? = null
@@ -186,6 +205,34 @@ class SwitchOptionWindow(di: DI) :
                             labels.forEachIndexed { i, label ->
                                 popup.menu.add(0, i, i, label).setOnMenuItemClickListener {
                                     KeyboardLayoutState.setMode(service, modes[i])
+                                    Toast.makeText(service, label, Toast.LENGTH_SHORT).show()
+                                    refreshEntries()
+                                    returnToKeyboard()
+                                    true
+                                }
+                            }
+                            popupMenu?.dismiss()
+                            popupMenu = popup
+                            popup.show()
+                        }
+
+                        SwitchOptionEntry.Static.Type.OneHandWidth -> {
+                            val popup = PopupMenu(context, view)
+                            val labels =
+                                arrayOf(
+                                    context.getString(R.string.one_hand_width_narrow),
+                                    context.getString(R.string.one_hand_width_standard),
+                                    context.getString(R.string.one_hand_width_wide),
+                                )
+                            val percents =
+                                intArrayOf(
+                                    KeyboardLayoutState.ONE_HAND_WIDTH_NARROW,
+                                    KeyboardLayoutState.ONE_HAND_WIDTH_STANDARD,
+                                    KeyboardLayoutState.ONE_HAND_WIDTH_WIDE,
+                                )
+                            labels.forEachIndexed { i, label ->
+                                popup.menu.add(0, i, i, label).setOnMenuItemClickListener {
+                                    KeyboardLayoutState.setOneHandWidthPercent(service, percents[i])
                                     Toast.makeText(service, label, Toast.LENGTH_SHORT).show()
                                     refreshEntries()
                                     returnToKeyboard()
