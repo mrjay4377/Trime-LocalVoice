@@ -24,6 +24,7 @@ import com.osfans.trime.ime.bar.UnrollButtonStateMachine
 import com.osfans.trime.ime.broadcast.InputBroadcastReceiver
 import com.osfans.trime.ime.candidates.unrolled.decoration.FlexboxVerticalDecoration
 import com.osfans.trime.ime.core.InputView
+import com.osfans.trime.ime.handwriting.HandwritingCandidateBridge
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -96,11 +97,25 @@ class CompactCandidateDelegate(override val di: DI) :
     val adapter by lazy {
         CompactCandidateViewAdapter(scope).apply {
             setOnItemClickListener { _, _, position ->
-                rime.launchOnReady { it.selectCandidate(position, global = true) }
+                if (HandwritingCandidateBridge.active) {
+                    // 手写候选不是 Rime 会话产生的，走 selectCandidate 会去选一个不存在的
+                    // Rime 候选。这里直接把点中的字交给手写面板上屏（service.commitText）。
+                    HandwritingCandidateBridge.candidates
+                        .getOrNull(position)
+                        ?.text
+                        ?.let { HandwritingCandidateBridge.pick(it) }
+                } else {
+                    rime.launchOnReady { it.selectCandidate(position, global = true) }
+                }
             }
             setOnItemLongClickListener { _, view, position ->
-                inputView.showCandidateActionMenu(position, items[position].text, view, global = true)
-                true
+                if (HandwritingCandidateBridge.active) {
+                    // Rime 的「删除候选 / 造词」菜单对手写候选无意义，长按不弹菜单。
+                    false
+                } else {
+                    inputView.showCandidateActionMenu(position, items[position].text, view, global = true)
+                    true
+                }
             }
         }
     }
@@ -174,7 +189,16 @@ class CompactCandidateDelegate(override val di: DI) :
     }
 
     override fun onCandidateListUpdate(data: Candidates.Bulk) {
-        val (total, highlighted, candidates) = data
+        // 手写期间一律用桥接候选覆盖 Rime 候选：宿主 App 会频繁重启输入连接并广播空候选，
+        // 不覆盖的话刚发布的手写候选会被下一次空更新立刻冲掉。
+        val effective =
+            if (HandwritingCandidateBridge.active) {
+                val arr = HandwritingCandidateBridge.candidates
+                Candidates.Bulk(arr.size, 0, arr)
+            } else {
+                data
+            }
+        val (total, highlighted, candidates) = effective
 
         val maxSpanCount = maxSpanCountPref.getValue()
 

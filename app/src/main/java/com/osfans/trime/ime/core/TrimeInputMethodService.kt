@@ -358,7 +358,8 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         RimeDaemon.destroySession(javaClass.name)
     }
 
-    private fun handleReturnKey() {
+    /** 供手写面板底部的「换行」键复用：与键盘回车键完全同一套编辑器动作判定。 */
+    fun handleReturnKey() {
         val info = currentInputEditorInfo
         val action = EditorEnterAction.resolve(info.inputType, info.imeOptions, info.actionId, info.actionLabel)
         if (action == null) {
@@ -731,46 +732,176 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     /** 流式中间结果是否正以 composing 形式留在目标输入框里。 */
     private var voiceComposingActive = false
 
+    /** 本次语音会话已 commitText 落定的稳定前缀（流式稳定前缀上屏）。 */
+    private var voiceCommittedPrefix = ""
+
+    /** 第一段实体前缀写入前的光标绝对偏移；-1 = 未记录，用于按区间撤销已落定文字。 */
+    private var voiceAnchorStart = -1
+
     /**
-     * 流式语音边说边出字：把中间结果直接写进目标输入框的 composing 区。
-     * 不复用 Rime 的 composingText 字段，避免和拼音 preedit 互相覆盖；
-     * 松手后的最终结果经 commitVoiceText() → commitText() 自动替换掉这段 composing。
+     * 语音热词：取光标前一段文字作为上下文提示（全程本地，仅 Binder 调用，不读磁盘）。
+     * 由 LocalVoiceController 在「上下文提示」开关打开时调用。
      */
-    fun updateVoiceComposing(text: String) {
-        val ic = currentInputConnection ?: return
-        runCatching {
+    fun voiceContextText(): String = runCatching {
+        currentInputConnection?.getTextBeforeCursor(120, 0)?.toString().orEmpty()
+    }.getOrDefault("")
+
+    /**
+     * 流式语音边说边出字。稳定前缀模式下 [tail] 只是「可改尾部」：
+     * 连续数帧不变的前缀用 [commitDelta] 增量 commitText 落定，不再整句反复擦写。
+     * 不复用 Rime 的 composingText 字段，避免和拼音 preedit 互相覆盖。
+     *
+     * @return 是否真的写进了输入框。失败时调用方必须回滚 stabilizer，否则两边状态失步。
+     */
+    fun updateVoiceComposing(tail: String, commitDelta: String = ""): Boolean {
+        val ic = currentInputConnection ?: return false
+        val previousPrefix = voiceCommittedPrefix
+        return runCatching {
             ic.beginBatchEdit()
-            ic.setComposingText(text, 1)
-            ic.endBatchEdit()
-            voiceComposingActive = text.isNotEmpty()
-        }.onFailure { Timber.w(it, "voice composing update failed") }
+            try {
+                if (commitDelta.isNotEmpty()) {
+                    // commitText 会替换当前 composing 区，先把上一帧的尾部清空，
+                    // 否则待落定前缀会插进旧 tail 里造成重复。普通帧只做一次 setComposingText。
+                    if (voiceComposingActive) ic.setComposingText("", 1)
+                    // 记录会话锚点：第一段实体文字写入前的光标绝对偏移。之后即便用户移动
+                    // 光标，取消 / 定稿也能按这个区间精确撤销，而不是只比对光标前文字。
+                    if (voiceAnchorStart < 0 || voiceCommittedPrefix.isEmpty()) {
+                        voiceAnchorStart = runCatching {
+                            ic.getExtractedText(ExtractedTextRequest(), 0)?.selectionStart ?: -1
+                        }.getOrDefault(-1)
+                    }
+                    ic.commitText(commitDelta, 1)
+                    voiceCommittedPrefix += commitDelta
+                }
+                ic.setComposingText(tail, 1)
+            } finally {
+                ic.endBatchEdit()
+            }
+            voiceComposingActive = tail.isNotEmpty()
+            true
+        }.onFailure {
+            Timber.w(it, "voice composing update failed")
+            // 本帧可能已经把 commitDelta 写成实体文字，内部状态必须回到帧前；
+            // 上层同步回滚 stabilizer，下一帧会重新按 LSP 落定，不会永久缺字。
+            val delta = voiceCommittedPrefix.removePrefix(previousPrefix)
+            if (delta.isNotEmpty()) {
+                runCatching {
+                    val before = ic.getTextBeforeCursor(delta.length, 0)?.toString().orEmpty()
+                    if (before == delta) ic.deleteSurroundingText(delta.length, 0)
+                }
+            }
+            voiceCommittedPrefix = previousPrefix
+            if (voiceCommittedPrefix.isEmpty()) voiceAnchorStart = -1
+        }.getOrDefault(false)
+    }
+
+    /**
+     * 撤销已落定的实体前缀。优先按会话锚点定位区间并核对内容，用户中途移动光标也能删；
+     * 锚点取不到或区间内容已被改动时退回「光标前正好是前缀」的保守判定，绝不误删用户文字。
+     */
+    private fun removeCommittedPrefix(ic: android.view.inputmethod.InputConnection, prefix: String) {
+        if (prefix.isEmpty()) {
+            voiceAnchorStart = -1
+            return
+        }
+        val start = voiceAnchorStart
+        if (start >= 0) {
+            val full = runCatching { ic.getExtractedText(ExtractedTextRequest(), 0)?.text }
+                .getOrNull()
+            val end = start + prefix.length
+            if (full != null && end <= full.length &&
+                full.subSequence(start, end).toString() == prefix
+            ) {
+                runCatching {
+                    ic.setSelection(end, end)
+                    ic.deleteSurroundingText(prefix.length, 0)
+                }.onFailure { Timber.w(it, "voice committed prefix remove failed") }
+                voiceAnchorStart = -1
+                return
+            }
+        }
+        val before = runCatching { ic.getTextBeforeCursor(prefix.length, 0)?.toString().orEmpty() }
+            .getOrDefault("")
+        if (before == prefix) ic.deleteSurroundingText(prefix.length, 0)
+        voiceAnchorStart = -1
     }
 
     /** 取消 / 识别失败时撤销尚未确认的中间文字，不在文本框里留半句话。 */
     fun cancelVoiceComposing() {
-        if (!voiceComposingActive) return
+        val hadComposing = voiceComposingActive
+        val prefix = voiceCommittedPrefix
+        if (!hadComposing && prefix.isEmpty()) {
+            voiceAnchorStart = -1
+            return
+        }
         voiceComposingActive = false
-        runCatching { currentInputConnection?.setComposingText("", 1) }
-            .onFailure { Timber.w(it, "voice composing cancel failed") }
+        voiceCommittedPrefix = ""
+        runCatching {
+            val ic = currentInputConnection
+            if (ic != null) {
+                ic.beginBatchEdit()
+                try {
+                    if (hadComposing) ic.setComposingText("", 1)
+                    // 已落定的前缀是实体文字，取消时也要撤掉。
+                    removeCommittedPrefix(ic, prefix)
+                } finally {
+                    ic.endBatchEdit()
+                }
+            } else {
+                voiceAnchorStart = -1
+            }
+        }.onFailure {
+            Timber.w(it, "voice composing cancel failed")
+            voiceAnchorStart = -1
+        }
     }
 
     fun commitVoiceText(
         text: String,
         onFailed: ((String) -> Unit)? = null,
     ) {
+        val prefix = voiceCommittedPrefix
         fun attempt(remaining: Int) {
             val ok = runCatching {
-                if (currentInputConnection == null) {
+                val ic = currentInputConnection
+                if (ic == null) {
                     false
-                } else {
+                } else if (prefix.isEmpty()) {
+                    // 普通模式（或稳定化被禁用）：commitText 会替换整句 composing。
                     commitText(text)
+                    true
+                } else {
+                    // 稳定前缀模式：前缀已是实体文字，只把 composing 尾部换成最终尾部并收尾，
+                    // 不能再用 commitText 写整句，否则前缀会重复一遍。
+                    val mismatch = !text.startsWith(prefix)
+                    val tail = if (mismatch) text else text.substring(prefix.length)
+                    ic.beginBatchEdit()
+                    if (voiceComposingActive) ic.setComposingText("", 1)
+                    if (mismatch) {
+                        // 引擎罕见地回改了已落定前缀：按会话锚点删掉整段旧前缀，
+                        // 再写完整最终结果。用户中途动过光标也能删掉。
+                        removeCommittedPrefix(ic, prefix)
+                    } else {
+                        voiceAnchorStart = -1
+                    }
+                    ic.setComposingText(tail, 1)
+                    ic.finishComposingText()
+                    ic.endBatchEdit()
+                    voiceComposingActive = false
+                    voiceCommittedPrefix = ""
+                    composingText = ""
+                    lastCommittedText = text
                     true
                 }
             }.onFailure { Timber.w(it, "voice commit failed") }.getOrDefault(false)
             if (ok) return
-            if (remaining > 0) {
+            // 稳定模式的写操作不是幂等的，重试会重复插入尾部；一次失败就直接走剪贴板兜底。
+            if (remaining > 0 && prefix.isEmpty()) {
                 voiceCommitHandler.postDelayed({ attempt(remaining - 1) }, 80L)
             } else {
+                // 不能在撤销之前清状态：实体前缀 + composing 半句还留在输入框里，
+                // 提前清会让 cancelVoiceComposing() 直接 return，污染下一次输入。
+                cancelVoiceComposing()
                 runCatching {
                     (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
                         .setPrimaryClip(ClipData.newPlainText("语音识别结果", text))
@@ -794,6 +925,8 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         composingText = ""
         // 最终结果已经替换掉流式中间文字，会话收尾时不要再撤销它。
         voiceComposingActive = false
+        voiceCommittedPrefix = ""
+        voiceAnchorStart = -1
         InputFeedbackManager.textCommitSpeak(text)
     }
 

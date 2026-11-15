@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
 import com.osfans.trime.ime.core.TrimeInputMethodService
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -28,7 +29,12 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private class Session(val familyId: String, val keepAudio: Boolean) {
+    private class Session(
+        val familyId: String,
+        val keepAudio: Boolean,
+        /** 是否启用「稳定前缀上屏」；翻译 / 简繁转换会改写整句，必须保持整句 composing。 */
+        var stableMode: Boolean = false,
+    ) {
         /** 只有在开启「保存录音」时才真正缓存整段 PCM；流式识别本身只需计数。 */
         val pcm = ByteArrayOutputStream()
         var pcmBytes = 0
@@ -38,6 +44,8 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
         var timeoutJob: Job? = null
         var finishing = false
         var finished = false
+        /** 已拿到最终结果、正在交付（等离线翻译）；此时 finished 仍为 false，超时与取消都有效。 */
+        var delivering = false
         var seconds = 0f
         var peakLevel = 0f
         var silentMs = 0
@@ -46,6 +54,9 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
 
     @Volatile
     private var current: Session? = null
+
+    /** 流式中间结果的稳定前缀决策器；只在主线程由 onPartial 与 start() 的 post 访问。 */
+    private val stabilizer = VoiceTextStabilizer()
 
     val isActive: Boolean get() = current != null
 
@@ -108,6 +119,7 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
         cancel()
         publishRecording(false)
         main.post {
+            stabilizer.reset()
             onLevelChanged?.invoke(0f)
             service.cancelVoiceComposing()
         }
@@ -130,15 +142,45 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
             notice("未找到本地模型，请把模型文件放到：${status.root.absolutePath}")
             return false
         }
+        // 按住瞬间就在后台预热离线识别器：录音与加载并行，松手解码通常直接命中缓存。
+        // 不改动卸载策略，流式家族仍走「按住时按需加载」。
+        VoiceLifecycle.ensureLoaded(service, familyId, model)
+        // 热词 = 自定义热词 + Rime 用户词库快照 + 光标前文字，全部本地处理。
+        val contextText =
+            if (LocalVoiceSettings.isHotwordsContextEnabled(service)) service.voiceContextText() else ""
+        val hotwordsForAsr = VoiceHotwords.build(service, contextText)
+        // 只有 Transducer 架构能接 createStream(String hotwords)；给其它架构传会触发
+        // sherpa-onnx 的 SHERPA_ONNX_EXIT(-1)。
+        val streamHotwords =
+            if (VoiceHotwords.supportsStreamHotwords(familyId)) hotwordsForAsr.tokenized else ""
+        // LLM 架构（Qwen3-ASR / FunASR Nano）：每次会话用 stream.setOption("hotwords", csv)
+        // 覆盖词表。ASCII 逗号纯词表，且可以包含实时输入框上下文、不会重建识别器。
+        val sessionHotwords =
+            if (VoiceHotwords.supportsSessionHotwords(familyId)) {
+                VoiceHotwords.buildCsv(service, contextText)
+            } else {
+                ""
+            }
+        // 翻译与简繁转换会整体改写最终文本，稳定化只能用于「原样上屏」的流式会话。
+        val stableMode = VoiceModels.isStreaming(familyId) &&
+            !LocalVoiceSettings.isTranslateEnabled(service) &&
+            !ChineseConverter.needsTable(LocalVoiceSettings.outputConversion(service))
 
         val powerSave = LocalVoiceSettings.isPowerSave(service)
-        val session = Session(familyId, keepAudio = LocalVoiceSettings.isSaveRecording(service))
+        val session = Session(
+            familyId,
+            keepAudio = LocalVoiceSettings.isSaveRecording(service),
+            stableMode = stableMode,
+        )
         current = session
         val listener = object : AsrListener {
             override fun onFinal(text: String) {
                 main.post {
-                    if (current !== session || session.finished) return@post
-                    session.finished = true
+                    if (current !== session || session.finished || session.delivering) return@post
+                    // 这里不能置 finished：离线翻译耗时长、也可能抛异常，会话必须保持「未完成」，
+                    // 否则 5 分钟超时兜底与用户取消都会被 finished 短路，结果是识别中提示
+                    // 永远不收起、composing 半句残留、结果丢失。delivering 只防引擎重复回调。
+                    session.delivering = true
                     if (text.isBlank()) {
                         val hint =
                             if (session.peakLevel < 0.02f) {
@@ -150,16 +192,23 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
                         cleanup(session)
                         return@post
                     }
+                    // 文本层纠错只作用于「识别原文」一次，随后才做简繁转换：
+                    // 规则表统一写简体，转换结果仍然跟随用户的输出设置。
+                    // 覆盖 SenseVoice / Paraformer / CTC 等所有不吃 ASR 热词的家族。
+                    val corrected = VoiceCorrections.apply(service, text)
                     // 上屏前按设置做离线简繁转换；转换失败时 ChineseConverter 原样返回。
                     val mode = LocalVoiceSettings.outputConversion(service)
                     val traditional = service.isTraditionalMode
-                    val original = ChineseConverter.convert(service, text, mode, traditional)
+                    val original = ChineseConverter.convert(service, corrected, mode, traditional)
                     Timber.i(
-                        "LocalVoice result %d -> %d chars, mode=%s, traditional=%s (%.1fs audio)",
-                        text.length, original.length, mode, traditional, session.seconds,
+                        "LocalVoice result %d -> %d -> %d chars, corrected=%s, mode=%s, traditional=%s (%.1fs audio)",
+                        text.length, corrected.length, original.length, text != corrected,
+                        mode, traditional, session.seconds,
                     )
 
                     fun deliver(output: String, fallbackNotice: String?) {
+                        // 翻译返回前会话可能已被超时兜底或用户取消，此时不能再上屏。
+                        if (current !== session || session.finished) return
                         dismissNotice()
                         service.commitVoiceText(output) { msg -> notice(msg) }
                         if (fallbackNotice != null) notice(fallbackNotice)
@@ -171,13 +220,24 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
                         notice("正在离线翻译…")
                         val direction = LocalVoiceSettings.translateDirection(service)
                         scope.launch {
-                            val translated = OfflineTranslator.translate(service, original, direction)
+                            // 翻译抛异常时原来整个协程静默死掉：结果丢失、提示不收起、
+                            // composing 残留，超时兜底又因为 finished 已提前置位而不触发。
+                            // 现在统一降级为「按原文上屏」，失败也不会把会话挂在半空。
+                            val outcome = runCatching {
+                                OfflineTranslator.translate(service, original, direction)
+                            }
+                            outcome.onFailure {
+                                // 协程被取消属于正常收尾，不能当成翻译失败再上屏一次。
+                                if (it is CancellationException) throw it
+                                Timber.w(it, "LocalVoice translation failed, fallback to original")
+                            }
+                            val translated = outcome.getOrNull()
                             main.post {
-                                if (current !== session) return@post
+                                if (current !== session || session.finished) return@post
                                 deliver(
                                     translated ?: original,
                                     if (translated == null) {
-                                        "离线翻译未就绪，已按原文上屏 · 请在设置里下载语言包"
+                                        "离线翻译未就绪或失败，已按原文上屏 · 请在设置里检查语言包"
                                     } else {
                                         null
                                     },
@@ -194,7 +254,18 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
             override fun onPartial(text: String) {
                 main.post {
                     if (current !== session || session.finished || !recording) return@post
-                    service.updateVoiceComposing(text)
+                    if (session.stableMode) {
+                        // 稳定前缀：不变的部分 commitText 落定，只让末尾几个字留在 composing。
+                        val step = stabilizer.onPartial(text)
+                        if (!service.updateVoiceComposing(step.tail, step.commitDelta)) {
+                            // 本帧没写进输入框（ic 为空或 batch edit 抛错）：必须回滚 stabilizer，
+                            // 否则后续帧都按「这段已落定」计算 tail，文字会永久缺字。
+                            stabilizer.rollback(step)
+                        }
+                    } else {
+                        // 翻译 / 简繁转换会改写整句，保持原来的整句 composing 替换。
+                        service.updateVoiceComposing(text)
+                    }
                 }
             }
 
@@ -205,8 +276,8 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
 
             override fun onError(message: String) {
                 main.post {
-                    if (current !== session || session.finished) return@post
-                    session.finished = true
+                    // 最终结果已到、正在等翻译时，引擎迟到的错误不该打断上屏。
+                    if (current !== session || session.finished || session.delivering) return@post
                     notice(message)
                     cleanup(session)
                 }
@@ -223,6 +294,7 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
                 listener = listener,
                 model = model,
                 familyId = familyId,
+                hotwords = streamHotwords,
                 onLoadStart = { notice("正在加载本地模型，首次加载可能较慢…") },
             )
         } else {
@@ -232,7 +304,9 @@ class LocalVoiceController(private val service: TrimeInputMethodService) {
                 listener = listener,
                 familyId = familyId,
                 model = model,
+                hotwords = streamHotwords,
                 onLoadStart = { notice("正在加载本地模型，首次加载可能较慢…") },
+                sessionHotwords = sessionHotwords,
             )
         }
         session.engine = engine

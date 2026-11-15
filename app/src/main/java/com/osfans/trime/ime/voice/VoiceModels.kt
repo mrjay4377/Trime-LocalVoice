@@ -201,11 +201,16 @@ object VoiceModels {
      * 它会被还原成真实文件路径，sherpa-onnx native 按路径 fopen 直接读取，无需复制进私有目录。
      * 否则回退到应用私有目录（Android/data/<包名>/files/rime/voice），native 同样可直读。
      */
+    /**
+     * @param probe 是否做「写探针」。识别路径（按住语音键的主线程）传 false：只判断目录是否存在，
+     * 不 mkdirs、不写 .voice_write_probe、不写 README.txt，避免把磁盘 IO 压到按键瞬间。
+     * 安装 / 导出 / 保存录音等真要写文件的路径保持默认 true。
+     */
     @Suppress("DEPRECATION")
-    private fun candidateRoots(context: Context): List<File> {
+    private fun candidateRoots(context: Context, probe: Boolean = true): List<File> {
         val roots = mutableListOf<File>()
         // 首选：使用者资料夹 / voice（需所有文件权限 + 已选资料夹 + 可写探测通过）。
-        externalVoiceRoot(context)?.let { roots += it }
+        externalVoiceRoot(context, probe)?.let { roots += it }
         // 回退与兼容：应用私有外部目录，native 可直读。
         runCatching { roots += File(DataManager.userDataDir, DIR_NAME) }
         runCatching { roots += File(UserDataManager.userDataDir, DIR_NAME) }
@@ -231,13 +236,14 @@ object VoiceModels {
 
     /** 使用者资料夹 / voice；未开启、未授权、未选资料夹或不可写时返回 null。
      *  全局存储模式为 EXTERNAL_DIRECT 时也算开启（模型跟随使用者资料夹）。 */
-    private fun externalVoiceRoot(context: Context): File? {
+    private fun externalVoiceRoot(context: Context, probe: Boolean = true): File? {
         val generalExternal = UserDataManager.isExternalDirect()
         if (!LocalVoiceSettings.useUserDataDir(context) && !generalExternal) return null
         if (!hasAllFilesAccess()) return null
         val base = UserDataManager.externalRimeDirAsFile() ?: return null
         val voice = File(base, DIR_NAME)
-        return if (probeWritable(voice)) voice else null
+        // 只读路径不创建目录、不落探针文件：native 只需要一个真实存在、能 fopen 的目录。
+        return if (if (probe) probeWritable(voice) else voice.isDirectory) voice else null
     }
 
     /** 主目录是否落在「使用者资料夹」下；用于设置页提示当前模型位置。 */
@@ -254,6 +260,12 @@ object VoiceModels {
     fun roots(context: Context): List<File> = candidateRoots(context)
 
     fun primaryRoot(context: Context): File = candidateRoots(context).first()
+
+    /**
+     * 纯只读的主目录：供按住语音键时的模型状态检查使用，不创建目录、不做写探针、不写说明文件。
+     * 返回的目录可能还不存在，仅用于提示文字，识别用的模型路径来自 [status] 的 resolved。
+     */
+    fun readOnlyRoot(context: Context): File = candidateRoots(context, probe = false).first()
 
     /** 创建用户目录 / voice，并放一份说明文件，方便用户知道该放什么。 */
     fun ensureRoot(context: Context): File {
@@ -398,7 +410,9 @@ object VoiceModels {
     /** 检查模型状态；未就绪时返回缺失最少的一种布局所缺的文件。 */
     fun status(context: Context, familyId: String): VoiceModelStatus {
         val family = family(familyId) ?: FAMILIES.first()
-        val root = ensureRoot(context)
+        // 识别启动路径会在按键瞬间同步调用本方法：只读取根路径，不 mkdirs / 不写探针 /
+        // 不写 README.txt。写目录的活留给 saveRecording、模型安装与设置页（ensureRoot）。
+        val root = readOnlyRoot(context)
 
         // 最高优先级：用户在「语音识别引擎」里手动选中的那套模型目录（绝对路径）。
         // 用户把多个引擎的解压包直接放进 voice 时，靠这条才能切换，不再永远命中扫描到的第一套。
@@ -424,7 +438,7 @@ object VoiceModels {
             val candidates = LinkedHashSet<File>()
             candidates += File(File(root, family.id), selected)
             // 兼容旧版：手动包曾把目录名存在 selectedVariant 里，但目录并不在 <family>/ 下。
-            candidateRoots(context).forEach { r ->
+            candidateRoots(context, probe = false).forEach { r ->
                 candidates += File(r, selected)
                 r.listFiles()?.filter { it.isDirectory }?.forEach { candidates += File(it, selected) }
             }
@@ -442,7 +456,7 @@ object VoiceModels {
             }
         }
         var best: Attempt? = null
-        for (candidate in candidateRoots(context)) {
+        for (candidate in candidateRoots(context, probe = false)) {
             if (!candidate.isDirectory) continue
             for (dir in searchDirs(candidate, family)) {
                 val result = attempt(dir, family)

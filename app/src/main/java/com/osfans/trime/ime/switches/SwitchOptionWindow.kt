@@ -18,11 +18,13 @@ import com.osfans.trime.core.SchemaItem
 import com.osfans.trime.daemon.RimeSession
 import com.osfans.trime.daemon.launchOnReady
 import com.osfans.trime.data.theme.Theme
+import com.osfans.trime.handwriting.HandwritingSettings
 import com.osfans.trime.data.theme.ThemeScope
 import com.osfans.trime.ime.bar.ui.ToolButton
 import com.osfans.trime.ime.broadcast.InputBroadcastReceiver
 import com.osfans.trime.ime.core.TrimeInputMethodService
 import com.osfans.trime.ime.dialog.EnabledSchemaPickerDialog
+import com.osfans.trime.ime.handwriting.HandwritingWindow
 import com.osfans.trime.ime.keyboard.KeyboardLayoutMode
 import com.osfans.trime.ime.keyboard.KeyboardLayoutState
 import com.osfans.trime.ime.keyboard.KeyboardWindow
@@ -69,6 +71,15 @@ class SwitchOptionWindow(di: DI) :
             } else {
                 context.getString(R.string.floating_keyboard)
             }
+        // 与「悬浮键盘 · 已开启」一致：手写也是带状态文字的开关项。
+        // 状态取自持久化的手写功能开关（设置页「启用手写输入」共用），不依赖当前窗口，
+        // 因为宫格菜单本身就占着当前窗口，无法用 currentWindowIs 判断。
+        val handwritingOn = HandwritingSettings.isEnabled(context)
+        val handwritingLabel =
+            context.getString(R.string.handwriting_settings) +
+                " · " + context.getString(
+                    if (handwritingOn) R.string.keyboard_layout_on else R.string.keyboard_layout_off,
+                )
         // 与咩版一致：最前两项固定为「键盘样式」「方案」，模式切换放在其后。
         val entries = mutableListOf<SwitchOptionEntry>(
             SwitchOptionEntry.Static(
@@ -100,6 +111,12 @@ class SwitchOptionWindow(di: DI) :
                 context.getString(R.string.virtual_keyboard),
                 R.drawable.ic_baseline_keyboard_24,
                 SwitchOptionEntry.Static.Type.Keyboard,
+            ),
+            // icon 传 0 时宫格用「手」字作图标，无需新增 drawable。
+            SwitchOptionEntry.Static(
+                handwritingLabel,
+                0,
+                SwitchOptionEntry.Static.Type.Handwriting,
             ),
         )
         // 单手模式下才出现「键盘宽度」三档，避免普通 / 悬浮模式的宫格被无用项占满。
@@ -165,6 +182,25 @@ class SwitchOptionWindow(di: DI) :
             ) {
                 when (entry) {
                     is SwitchOptionEntry.Static -> when (entry.type) {
+                        // 开关语义与「悬浮键盘」一致：切换持久化的手写功能开关，并立刻给出效果。
+                        // 开启 → 直接进入手写面板；关闭 → 回到键盘（再进面板会提示已在设置里关闭）。
+                        SwitchOptionEntry.Static.Type.Handwriting -> {
+                            val nextOn = !HandwritingSettings.isEnabled(context)
+                            HandwritingSettings.setEnabled(context, nextOn)
+                            Toast
+                                .makeText(
+                                    service,
+                                    if (nextOn) R.string.handwriting_switch_on else R.string.handwriting_switch_off,
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                            refreshEntries()
+                            if (nextOn) {
+                                windowManager.attachWindow(HandwritingWindow(di))
+                            } else {
+                                windowManager.attachWindow(KeyboardWindow)
+                            }
+                        }
+
                         SwitchOptionEntry.Static.Type.SchemaList -> showDialog { r ->
                             EnabledSchemaPickerDialog.build(r, service.lifecycleScope, context) {
                                 setNegativeButton(R.string.enable_schemata) { _, _ ->

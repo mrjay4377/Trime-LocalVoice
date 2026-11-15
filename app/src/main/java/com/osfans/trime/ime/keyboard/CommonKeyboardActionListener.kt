@@ -27,6 +27,8 @@ import com.osfans.trime.ime.bar.InputBarDelegate
 import com.osfans.trime.ime.clipboard.ClipboardWindow
 import com.osfans.trime.ime.core.TrimeInputMethodService
 import com.osfans.trime.ime.dialog.EnabledSchemaPickerDialog
+import com.osfans.trime.handwriting.HandwritingSettings
+import com.osfans.trime.ime.handwriting.HandwritingWindow
 import com.osfans.trime.ime.voice.LocalVoiceController
 import com.osfans.trime.ime.voice.LocalVoiceSettings
 import com.osfans.trime.ime.switches.SwitchOptionWindow
@@ -307,6 +309,22 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
                 when (action.command) {
                     "liquid_keyboard" -> handleLiquidKeyboard(arg)
                     "menu_keyboard" -> windowManager.attachWindow(SwitchOptionWindow(di))
+                    // 主题工具栏可配 command: handwriting 直接进入手写面板；
+                    // 开箱入口在「更多」菜单里（SwitchOptionWindow）。
+                    // 这里只是「入口」，不做功能开关：开关在宫格项「手写输入 · 已开启/已关闭」。
+                    "handwriting" ->
+                        if (!HandwritingSettings.isEnabled(service)) {
+                            Toast
+                                .makeText(
+                                    service,
+                                    R.string.handwriting_switch_off,
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                        } else if (windowManager.currentWindowIs(HandwritingWindow::class.java)) {
+                            windowManager.attachWindow(KeyboardWindow)
+                        } else {
+                            windowManager.attachWindow(HandwritingWindow(di))
+                        }
                     "clipboard_window" -> handleClipboardWindow(arg)
                     "set_color_scheme" -> handleColorScheme(arg)
                     "set_theme" -> handleTheme(arg)

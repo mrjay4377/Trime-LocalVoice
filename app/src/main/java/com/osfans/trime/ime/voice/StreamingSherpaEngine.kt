@@ -94,12 +94,18 @@ internal object SherpaOnlineManager {
             unloadJob?.cancel()
             unloadJob = null
             val hit = cached
-            // 有会话正在使用识别器时一律不换、不释放：配置变更（含 pendingUnload）
-            // 都推迟到 endSession() 之后生效，杜绝 native use-after-free。
+            // 有会话正在使用识别器时不能立刻 free native 对象（use-after-free），
+            // 但必须比较 key：配置变了就保留待释放标记，让 endSession() 释放旧识别器，
+            // 下一次 get() 按新 key 重建，否则「会话中切模型」会一直拿旧模型推理。
             if (activeSessions > 0 && hit != null) {
-                // 空闲定时器恰好在本次说话时到点：撤销待释放标记，别把正在用的模型卸掉，
-                // 会话结束后 applyIdleUnloadPolicy() 会重新计时。
-                pendingUnload = false
+                if (cachedKey == key) {
+                    // 同一配置：空闲定时器恰好在本次说话时到点，撤销待释放标记，
+                    // 会话结束后 applyIdleUnloadPolicy() 会重新计时。
+                    pendingUnload = false
+                } else {
+                    // 本轮只能用旧模型推完（中途换 native 对象会崩），但下一会话必须换。
+                    pendingUnload = true
+                }
                 return@synchronized hit
             }
             if (hit != null && cachedKey == key && !pendingUnload) return@synchronized hit
@@ -198,9 +204,13 @@ internal object SherpaOnlineManager {
 }
 
 /** 一次会话的反射包装：持有 recognizer 与它创建的 stream，负责增量解码与文本提取。 */
-private class OnlineSession(private val recognizer: Any) {
+private class OnlineSession(private val recognizer: Any, hotwords: String = "") {
     private val cls = recognizer.javaClass
 
+    /**
+     * sherpa-onnx 的 createStream(String) 参数就是本次会话的热词（空格分隔的 token 串）。
+     * 每次说话可以传不同内容，识别器不用重建、缓存指纹也不变。
+     */
     private val createStream: Method = cls.methods.firstOrNull {
         it.name == "createStream" && it.parameterTypes.contentEquals(arrayOf(String::class.java))
     } ?: cls.methods.firstOrNull {
@@ -210,7 +220,7 @@ private class OnlineSession(private val recognizer: Any) {
     val stream: Any = if (createStream.parameterTypes.isEmpty()) {
         createStream.invoke(recognizer)!!
     } else {
-        createStream.invoke(recognizer, "")!!
+        createStream.invoke(recognizer, hotwords)!!
     }
 
     private val streamClass = stream.javaClass
@@ -288,6 +298,8 @@ class StreamingSherpaEngine(
     private val listener: AsrListener,
     private val model: ResolvedVoiceModel,
     private val familyId: String = VoiceModels.STREAMING_FAMILY,
+    /** 本次会话热词，透传给 OnlineRecognizer.createStream(String)。 */
+    private val hotwords: String = "",
     private val onLoadStart: () -> Unit = {},
 ) : AsrEngine {
     companion object {
@@ -365,8 +377,12 @@ class StreamingSherpaEngine(
                 append(name).append('=').append(path)
                 append('(').append(file.length()).append(':').append(file.lastModified()).append(");")
             }
-            append("|online|provider=cpu|powerSave=")
-                .append(LocalVoiceSettings.isPowerSave(context))
+            // 线程数与 buildOnlineConfig 用同一套算法；漏掉会让「只改线程数 / 省电档」
+            // 命中旧识别器，配置永远不生效。
+            val powerSave = LocalVoiceSettings.isPowerSave(context)
+            val threads = if (powerSave) 1 else LocalVoiceSettings.threads(context, familyId)
+            append("|online|provider=cpu|threads=").append(threads)
+                .append("|powerSave=").append(powerSave)
         }
     }
 
@@ -405,7 +421,7 @@ class StreamingSherpaEngine(
                 val recognizer = SherpaOnlineManager.get(config, key, onLoadStart)
                 // 模型就绪：收起「加载中」，随后回放队列里已缓冲的 PCM，开头语音一个字都不丢。
                 listener.onStatus("")
-                val s = OnlineSession(recognizer)
+                val s = OnlineSession(recognizer, hotwords)
                 online = s
                 session = s
                 for (chunk in channel) {

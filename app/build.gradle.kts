@@ -45,6 +45,8 @@ android {
         buildConfig = true
         viewBinding = true
         resValues = true
+        // 手写推理跨进程 AIDL：生成 IHandwritingInference.Stub / Proxy。
+        aidl = true
     }
 
     buildTypes {
@@ -152,8 +154,15 @@ ksp {
 
 dependencies {
     ksp(project(":codegen"))
-    // 本地语音输入（Qwen3-ASR 等）：sherpa-onnx 本地推理引擎（Apache-2.0，来自 BiBi-Keyboard）
+    // 本地语音输入（Qwen3-ASR 等）：sherpa-onnx 本地推理引擎（Apache-2.0，来自 BiBi-Keyboard）。
+    // 用原版 AAR：它自带 libonnxruntime.so（ORT 1.28.2），因为 libsherpa-onnx-jni.so 的
+    // 未定义符号是带 GNU 版本号的 OrtGetApiBase@VERS_1.28.2，只能由这份 core 满足。
+    // 手写的 ORT Java 桥需要 VERS_1.28.0，改名为 libort1280.so 后与本 so 用不同 SONAME 共存，
+    // 各自按符号版本绑定，互不介入。去 core 的 -noort.aar 保留在 libs 供回退，不再使用。
     implementation(files("libs/sherpa-onnx-2.0.1.aar"))
+    // 独立手写模块：自带官方 ORT 1.29.0 完整构建（Java API + core so + JNI 桥，三者同版本），
+    // core 与 JNI 桥的 SONAME / DT_NEEDED 已改为 libort1290.so，与 sherpa 的 1.28.2 隔离。
+    implementation(project(":handwriting"))
     // 离线翻译 Foxlet Translate 0.5.0（Bergamot / Marian + Mozilla 模型，MIT / MPL-2.0）。
     // AAR 声明 minSdk 28，而本分支 minSdk 21，故只取 classes.jar 与 arm64 native 库，
     // 运行时在 API 28+ 才启用（见 OfflineTranslator.isAvailable）。

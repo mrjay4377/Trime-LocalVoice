@@ -23,6 +23,7 @@ sealed class SwitchOptionEntry(
             OneHandMode,
             OneHandWidth,
             FloatingKeyboard,
+            Handwriting,
         }
     }
 

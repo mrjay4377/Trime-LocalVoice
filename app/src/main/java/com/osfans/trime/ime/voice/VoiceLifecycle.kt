@@ -32,7 +32,12 @@ object VoiceLifecycle {
         SherpaOnlineManager.cancelScheduledUnload()
         // onStartInput 已提前触发过一次时不要重启加载（600MB 模型重启一次代价很高）。
         if (preloadJob?.isActive == true) return
-        preloadJob = scope.launch { preloadInternal(ctx) }
+        preloadJob = scope.launch {
+            // 统一词库文件只有几 KB，先读到内存；模型加载与 Rime 词库导出排在后面。
+            runCatching { VoiceHotwordBook.reload(ctx) }
+            preloadInternal(ctx)
+            refreshHotwords(ctx)
+        }
     }
 
     /**
@@ -44,7 +49,59 @@ object VoiceLifecycle {
         val ctx = context.applicationContext
         if (!LocalVoiceSettings.isEnabled(ctx)) return
         if (preloadJob?.isActive == true) return
-        preloadJob = scope.launch { preloadInternal(ctx) }
+        preloadJob = scope.launch {
+            // 统一词库文件只有几 KB，先读到内存；模型加载与 Rime 词库导出排在后面。
+            runCatching { VoiceHotwordBook.reload(ctx) }
+            preloadInternal(ctx)
+            refreshHotwords(ctx)
+        }
+    }
+
+    /**
+     * 按住语音键瞬间触发：与录音并行预热离线识别器，松手解码时通常已命中缓存。
+     * 全档位生效（其它驻留档位的 onKeyboardShown 提前 return，从来没有预加载），
+     * 但不改变任何卸载策略——不安排空闲卸载，卸载仍由识别结束 / 键盘隐藏决定。
+     */
+    fun ensureLoaded(context: Context, family: String, model: ResolvedVoiceModel) {
+        val ctx = context.applicationContext
+        // 流式家族保持「按住时按需加载」：键盘弹出或按键瞬间吃 590MB 容易把低端机压死。
+        // 但仍要在后台把统一词库文件读进内存，否则「流式 + 非跟随键盘」档永远读不到热词。
+        if (VoiceModels.isStreaming(family)) {
+            scope.launch {
+                runCatching { VoiceHotwordBook.reload(ctx) }
+                // 流式档以前在这里提前 return，跳过了词库刷新，
+                // 导致 Rime 用户词库热词与识别纠错规则永远是空的。
+                refreshHotwords(ctx)
+            }
+            return
+        }
+        if (preloadJob?.isActive == true) return
+        preloadJob = scope.launch {
+            // 几 KB 的词库文件先读内存；Rime 词库导出较重，仍排在模型加载之后。
+            runCatching { VoiceHotwordBook.reload(ctx) }
+            // 预热优先：词库导出是磁盘 IO，放在加载之后，不拖慢本次「按住即预加载」。
+            runCatching { loadOffline(ctx, family, model) }
+                .onFailure { Timber.w(it, "voice model ensureLoaded failed") }
+            // 其它驻留档位不会走 onKeyboardShown 的预热，词库快照在这里补刷（内部有 30 分钟节流）。
+            refreshHotwords(ctx)
+        }
+    }
+
+    /** 预加载与按住预热的唯一实现，避免两份 config / 指纹逻辑走偏。 */
+    private suspend fun loadOffline(ctx: Context, family: String, model: ResolvedVoiceModel) {
+        val manager = SherpaOfflineManager.getInstance()
+        val (config, key) = OfflineSherpaEngine.buildConfig(ctx, family, model)
+        // preload() 内部还有一次 isLoaded 短路；这里提前判一次，连 config 反射构造都省掉。
+        if (manager.isLoaded(key)) return
+        manager.preload(config, key)
+    }
+
+    private fun refreshHotwords(ctx: Context) {
+        // 纠错词库在 IO 协程里读盘；上屏路径只读内存快照。
+        runCatching { VoiceCorrections.reload(ctx) }
+            .onFailure { Timber.w(it, "voice corrections reload failed") }
+        // 「Rime 用户词库」功能已移除：不再每 30 分钟导出一次用户词典快照，
+        // 也省掉了一次 native 调用与磁盘 IO。
     }
 
     private suspend fun preloadInternal(ctx: Context) {
@@ -54,14 +111,11 @@ object VoiceLifecycle {
             // 加载期间 PCM 排队，模型就绪后回放再逐块出字，开头语音不会丢。
             if (VoiceModels.isStreaming(family)) return@runCatching
             val model = VoiceModels.status(ctx, family).resolved ?: return@runCatching
-            val manager = SherpaOfflineManager.getInstance()
-            val (config, key) = OfflineSherpaEngine.buildConfig(ctx, family, model)
-            if (manager.isLoaded(key)) return@runCatching
-            manager.preload(config, key)
+            loadOffline(ctx, family, model)
             // 预加载也算一次「使用」：从这里开始计空闲时间，避免只预热不识别时
             // 自定义（或 5/15/30 预设）档的模型一直留在内存里。识别结束会重新计时。
             val minutes = LocalVoiceSettings.keepAliveMinutes(ctx, family)
-            if (minutes > 0) manager.scheduleUnload(minutes.toLong() * 60_000L)
+            if (minutes > 0) SherpaOfflineManager.getInstance().scheduleUnload(minutes.toLong() * 60_000L)
         }.onFailure { Timber.w(it, "voice model preload failed") }
     }
 

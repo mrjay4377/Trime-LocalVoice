@@ -5,6 +5,7 @@
 
 package com.osfans.trime
 
+import android.app.ActivityManager
 import android.app.Application
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -93,6 +94,27 @@ class TrimeApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
+        val mainProcess = isMainProcess()
+        // 手写推理子进程（:hw_infer）：只做最小初始化，绝不碰 DB / WorkManager /
+        // 广播 / 崩溃处理器。这样即便 ORT native 崩，子进程也只是安静重启，
+        // 不会误弹崩溃界面、不会与 IME 主进程争抢单例资源。
+        if (!mainProcess) {
+            Timber.plant(
+                object : Timber.Tree() {
+                    override fun log(
+                        priority: Int,
+                        tag: String?,
+                        message: String,
+                        t: Throwable?,
+                    ) {
+                        if (priority < Log.INFO) return
+                        Log.println(priority, "[${Thread.currentThread().name}]", message)
+                    }
+                },
+            )
+            return
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !userManager.isUserUnlocked) {
             isDirectBootMode = true
             registerReceiver(unlockReceiver, IntentFilter(Intent.ACTION_USER_UNLOCKED))
@@ -131,7 +153,6 @@ class TrimeApplication : Application() {
                 exitProcess(10)
             }
         }
-        instance = this
         try {
             if (BuildConfig.DEBUG) {
                 Timber.plant(
@@ -208,6 +229,22 @@ class TrimeApplication : Application() {
         coroutineScope.launch {
             BackgroundSyncWork.start(directBootAwareContext)
         }
+    }
+
+    /**
+     * 是否为主进程（applicationId 本身）。:hw_infer 等子进程返回 false。
+     * 用 ActivityManager 找自身 pid 对应进程名，全 API 通用（5.0+ runningAppProcesses
+     * 至少返回自身进程，足够判断）。拿不到时保守视为主进程，避免误跳 IME 主进程初始化。
+     */
+    private fun isMainProcess(): Boolean {
+        val name =
+            runCatching {
+                val am = getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                am?.runningAppProcesses
+                    ?.firstOrNull { it.pid == Process.myPid() }
+                    ?.processName
+            }.getOrNull()
+        return name == null || name == packageName
     }
 
     companion object {

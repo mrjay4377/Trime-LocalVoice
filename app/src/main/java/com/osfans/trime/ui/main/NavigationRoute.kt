@@ -14,6 +14,7 @@ import com.osfans.trime.ui.main.settings.AdvancedSettingsFragment
 import com.osfans.trime.ui.main.settings.CandidatesSettingsFragment
 import com.osfans.trime.ui.main.settings.ClipboardSettingsFragment
 import com.osfans.trime.ui.main.settings.GeneralSettingsFragment
+import com.osfans.trime.ui.main.settings.HandwritingSettingsFragment
 import com.osfans.trime.ui.main.settings.KeyboardSettingsFragment
 import com.osfans.trime.ui.main.settings.LocalAsrSettingsFragment
 import com.osfans.trime.ui.main.settings.ProfileSettingsFragment
@@ -55,6 +56,9 @@ sealed class NavigationRoute : Parcelable {
 
     @Serializable
     data object LocalAsr : NavigationRoute()
+
+    @Serializable
+    data object Handwriting : NavigationRoute()
 
     @Serializable
     data object Advanced : NavigationRoute()
@@ -103,6 +107,9 @@ sealed class NavigationRoute : Parcelable {
             }
             fragment<LocalAsrSettingsFragment, LocalAsr> {
                 label = ctx.getString(R.string.local_asr_settings)
+            }
+            fragment<HandwritingSettingsFragment, Handwriting> {
+                label = ctx.getString(R.string.handwriting_settings)
             }
             fragment<AdvancedSettingsFragment, Advanced> {
                 label = ctx.getString(R.string.advanced)

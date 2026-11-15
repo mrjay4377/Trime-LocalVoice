@@ -17,6 +17,16 @@
 -keep class com.k2fsa.sherpa.onnx.** { *; }
 -keep class com.osfans.trime.ime.voice.** { *; }
 
+# 手写推理跨进程 AIDL：Binder 通过类名/描述符查找 Stub，保留接口与生成的内部类。
+-keep class com.osfans.trime.ime.handwriting.IHandwritingInference { *; }
+-keep class com.osfans.trime.ime.handwriting.IHandwritingInference$Stub { *; }
+-keep class com.osfans.trime.ime.handwriting.IHandwritingInference$Stub$Proxy { *; }
+-keep class com.osfans.trime.ime.handwriting.HandwritingInferenceService { *; }
+# 推理引擎现在只在子进程被 Service 引用，R8 静态分析仍能看到，但保留整包更稳妥
+# （ORT Java 层有 native 方法声明与 JNI 名称绑定）。
+-keep class com.osfans.trime.handwriting.** { *; }
+-keep class ai.onnxruntime.** { *; }
+
 # kotlinx.serialization / kaml 通过注解与生成的 serializer 工作
 -keepattributes Signature, *Annotation*, InnerClasses, EnclosingMethod
 -keepclassmembers class **$$serializer { *; }

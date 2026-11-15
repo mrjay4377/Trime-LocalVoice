@@ -35,6 +35,8 @@ import com.osfans.trime.ime.bar.ui.VoiceIndicatorUi
 import com.osfans.trime.ime.broadcast.InputBroadcastReceiver
 import com.osfans.trime.ime.candidates.compact.CompactCandidateDelegate
 import com.osfans.trime.ime.candidates.unrolled.window.FlexboxUnrolledCandidateWindow
+import com.osfans.trime.ime.handwriting.HandwritingCandidateBridge
+import com.osfans.trime.ime.handwriting.HandwritingWindow
 import com.osfans.trime.ime.core.TrimeInputMethodService
 import com.osfans.trime.ime.keyboard.CommonKeyboardActionListener
 import com.osfans.trime.ime.keyboard.KeyBehavior
@@ -218,6 +220,12 @@ class InputBarDelegate(override val di: DI) :
                 UnrollButtonStateMachine.State.ClickToDetachWindow -> {
                     setUnrollButtonToDetach()
                     setUnrollButtonEnabled(true)
+                    // 展开窗打开期间把候选栏锁在候选页：右上角的收起按钮在 candidateUi 里，
+                    // 一旦 QuickBar 因为「候选为空」切回工具栏页，用户就点不到「再点返回」了。
+                    barStateMachine.push(
+                        QuickBarStateMachine.TransitionEvent.CandidatesUpdated,
+                        QuickBarStateMachine.BooleanKey.CandidateEmpty to false,
+                    )
                 }
 
                 UnrollButtonStateMachine.State.Hidden -> {
@@ -226,16 +234,35 @@ class InputBarDelegate(override val di: DI) :
             }
         }
 
+    private var unrollBaseWindow: BoardWindow? = null
+
     private fun setUnrollButtonToAttach() {
         candidateUi.unrollButton.setOnClickListener {
-            windowManager.attachWindow(FlexboxUnrolledCandidateWindow(di))
+            val base = windowManager.topWindow
+            unrollBaseWindow = base
+            val unrolled = FlexboxUnrolledCandidateWindow(di)
+            unrolled.baseWindow = base
+            // 手写候选必须在 attach 之前拷快照：attachWindow 会先 detach 手写面板。
+            if (HandwritingCandidateBridge.active) {
+                unrolled.handwritingCandidates = HandwritingCandidateBridge.candidates
+                // 挂起手写面板 detach 时的 clear()，让候选栏与收起按钮在整个展开期间都保持可用。
+                HandwritingCandidateBridge.suspendClear()
+            }
+            windowManager.attachWindow(unrolled)
         }
         candidateUi.unrollButton.setIcon(R.drawable.ic_baseline_expand_more_24)
     }
 
     private fun setUnrollButtonToDetach() {
         candidateUi.unrollButton.setOnClickListener {
-            windowManager.attachWindow(KeyboardWindow)
+            // 收起展开窗时回到「打开展开窗前的那个窗口」：手写时回到手写面板，否则回键盘。
+            // 二者类型不同（手写面板是 BoardWindow 实例，键盘是 ResidentWindow.Key），需分别调用重载。
+            val base = unrollBaseWindow
+            if (base != null) {
+                windowManager.attachWindow(base)
+            } else {
+                windowManager.attachWindow(KeyboardWindow)
+            }
         }
         candidateUi.unrollButton.setIcon(R.drawable.ic_baseline_expand_less_24)
     }
@@ -245,9 +272,21 @@ class InputBarDelegate(override val di: DI) :
     }
 
     override fun onCandidateListUpdate(data: Candidates.Bulk) {
+        // 手写面板挂载时，候选栏是否为空以桥接候选为准，否则 Rime 的空候选会把
+        // 状态机切回工具栏页，主候选栏（含手写候选与提示码）就被顶掉。
+        // 展开候选窗期间额外锁定为「非空」，避免宿主 App 的空候选广播把收起按钮顶掉。
+        val unrollOpen =
+            unrollButtonStateMachine.currentState ==
+                UnrollButtonStateMachine.State.ClickToDetachWindow
+        val empty =
+            when {
+                unrollOpen -> false
+                HandwritingCandidateBridge.active -> HandwritingCandidateBridge.candidates.isEmpty()
+                else -> data.candidates.isEmpty()
+            }
         barStateMachine.push(
             QuickBarStateMachine.TransitionEvent.CandidatesUpdated,
-            QuickBarStateMachine.BooleanKey.CandidateEmpty to data.candidates.isEmpty(),
+            QuickBarStateMachine.BooleanKey.CandidateEmpty to empty,
         )
     }
 
@@ -371,6 +410,11 @@ class InputBarDelegate(override val di: DI) :
     }
 
     override fun onWindowAttached(window: BoardWindow) {
+        // 只有手写面板与其展开候选窗允许桥接保持挂载；切到别窗口时强制释放，
+        // 防止展开窗被中途顶掉后手写候选残留、把普通键盘的 Rime 候选一直遮住。
+        if (window !is HandwritingWindow && window !is FlexboxUnrolledCandidateWindow) {
+            HandwritingCandidateBridge.forceClear()
+        }
         if (window is BoardWindow.BarBoardWindow) {
             tabUi.setTitle(window.title)
             window.onCreateBarView()?.let { tabUi.addExternal(it, window.showTitle) }

@@ -39,6 +39,22 @@ internal class ReflectiveStream(val instance: Any) {
         findMethod(instance.javaClass, "acceptWaveform", FloatArray::class.java)
     }.getOrNull()
     private val release = runCatching { findMethod(instance.javaClass, "release") }.getOrNull()
+    // Qwen3-ASR / FunASR Nano 的 native 支持 stream->HasOption("hotwords")，
+    // 每次会话可覆盖 config.hotwords，无需重建识别器。javap 核过 Java 侧签名。
+    private val setOptionMethod = runCatching {
+        findMethod(instance.javaClass, "setOption", String::class.java, String::class.java)
+    }.getOrNull()
+
+    /** @return 是否成功传入；方法不存在或 native 抛错时安全返回 false，识别照常进行。 */
+    fun setOption(key: String, value: String): Boolean {
+        val method = setOptionMethod ?: return false
+        if (value.isEmpty()) return false
+        return runCatching {
+            method.invoke(instance, key, value)
+            true
+        }.onFailure { Timber.w(it, "sherpa stream setOption(%s) failed", key) }
+            .getOrDefault(false)
+    }
 
     fun acceptWaveform(samples: FloatArray, sampleRate: Int) {
         val withRateMethod = withRate
@@ -62,12 +78,29 @@ internal class ReflectiveStream(val instance: Any) {
 
 internal class ReflectiveRecognizer(private val instance: Any, private val cls: Class<*>) {
     private val createStream = findMethod(cls, "createStream")
+    // sherpa-onnx 2.0.1 的 OfflineRecognizer 另有 createStream(String hotwords)
+    // → native createStreamWithHotwords，可给单次会话加词而不重建识别器。
+    private val createStreamWithHotwords = runCatching {
+        findMethod(cls, "createStream", String::class.java)
+    }.getOrNull()
     private val releaseMethod = runCatching { findMethod(cls, "release") }.getOrNull()
     private val streamClass = createStream.returnType
     private val decode = findMethod(cls, "decode", streamClass)
     private val getResult = findMethod(cls, "getResult", streamClass)
 
-    fun createStream(): ReflectiveStream = ReflectiveStream(createStream.invoke(instance)!!)
+    fun createStream(hotwords: String = ""): ReflectiveStream {
+        // 属性是可空的 Method?，Kotlin 不会对属性做智能转换，先取局部变量再判空。
+        val hotwordMethod = createStreamWithHotwords
+        val withHotwords =
+            if (hotwords.isBlank() || hotwordMethod == null) {
+                null
+            } else {
+                runCatching { hotwordMethod.invoke(instance, hotwords) }
+                    .onFailure { Timber.w(it, "sherpa hotwords stream failed, fallback to plain stream") }
+                    .getOrNull()
+            }
+        return ReflectiveStream((withHotwords ?: createStream.invoke(instance))!!)
+    }
 
     fun decode(stream: ReflectiveStream): String? {
         decode.invoke(instance, stream.instance)
@@ -153,11 +186,29 @@ internal class SherpaOfflineManager {
     @Volatile
     private var unloadJob: Job? = null
 
-    fun isLoaded(key: String): Boolean = cachedRecognizer != null && cachedKey == key
+    /** native 释放任务：由 unload() 统一持有，加载方在拿锁前先 join 它。 */
+    @Volatile
+    private var releaseJob: Job? = null
+
+    /**
+     * 卸载已经开始（正在释放或刚被标脏）。此前 isLoaded() 只看缓存，卸载协程里的
+     * mutex 还没轮到时会误报「已加载」，键盘唤起就直接跳过预加载；随后缓存被异步清掉，
+     * 第一次按语音键反而变成冷加载。标脏后 isLoaded 立即返回 false，临界窗口会正确重建。
+     */
+    @Volatile
+    private var pendingUnload = false
+
+    fun isLoaded(key: String): Boolean =
+        cachedRecognizer != null && cachedKey == key && !pendingUnload
 
     fun cancelScheduledUnload() {
         unloadJob?.cancel()
         unloadJob = null
+    }
+
+    /** 等上一次 native 释放真正结束；必须在抢 mutex 之前调用，否则与释放任务互相等锁。 */
+    private suspend fun awaitRelease() {
+        releaseJob?.takeIf { it.isActive }?.join()
     }
 
     /** 键盘隐藏后延迟释放；期间用户再次唤起键盘会取消这次卸载。 */
@@ -175,9 +226,10 @@ internal class SherpaOfflineManager {
      * 与 decodeOffline 共用互斥锁和缓存指纹，预加载过的模型下次识别直接命中缓存。
      */
     suspend fun preload(config: Any, key: String) {
+        awaitRelease()
         mutex.withLock {
             val cached = cachedRecognizer
-            if (cached != null && cachedKey == key) {
+            if (cached != null && cachedKey == key && !pendingUnload) {
                 // 已加载时不要再取消待执行的空闲卸载：预加载（设置页预热）在任意档位都会触发，
                 // 无脑 cancel 会让「空闲 N 分钟后卸载」的计时凭空消失、模型永久驻留。
                 // 「跟随键盘」档的取消由 VoiceLifecycle.onKeyboardShown 显式完成。
@@ -192,36 +244,45 @@ internal class SherpaOfflineManager {
             cachedRecognizer = raw
             cachedConfig = config
             cachedKey = key
+            pendingUnload = false
             Timber.i("sherpa offline model preloaded")
         }
     }
 
+    /**
+     * 释放与清空缓存放在同一个 mutex 里，且只有一条 releaseJob 会真正 free native 对象。
+     * 旧实现把 release() 写在 withLock 外且无条件执行：若这期间 preload() 换掉了缓存，
+     * 同一个 native 对象会被 free 两次（极端情况直接崩）。同时把释放 Job 交给 releaseJob
+     * 管理，让后续加载能先 join 它，避免新旧两个几百 MB 识别器短暂共存。
+     */
     fun unload() {
-        val snapshot = cachedRecognizer ?: return
-        scope.launch {
+        // 立即标脏：isLoaded() 不再误报，释放则交给唯一一条 releaseJob 串行处理。
+        pendingUnload = true
+        releaseJob = scope.launch {
             mutex.withLock {
-                if (cachedRecognizer !== snapshot) return@withLock
+                val snapshot = cachedRecognizer
                 cachedRecognizer = null
                 cachedConfig = null
                 cachedKey = null
+                snapshot?.release()
             }
-            snapshot.release()
             Timber.d("sherpa offline recognizer unloaded")
         }
     }
 
     /** 删除模型文件前同步释放：等正在进行的解码结束，再真正 free native 对象后返回。 */
     suspend fun unloadNow() {
-        val snapshot = mutex.withLock {
-            unloadJob?.cancel()
-            unloadJob = null
+        unloadJob?.cancel()
+        unloadJob = null
+        pendingUnload = true
+        awaitRelease()
+        mutex.withLock {
             val old = cachedRecognizer
             cachedRecognizer = null
             cachedConfig = null
             cachedKey = null
-            old
+            old?.release()
         }
-        snapshot?.release()
     }
 
     private fun createRecognizer(config: Any): Any {
@@ -243,15 +304,20 @@ internal class SherpaOfflineManager {
         sampleRate: Int,
         keepAliveMs: Long,
         alwaysKeep: Boolean,
+        hotwords: String = "",
+        /** 会话级词表：只给 Qwen3-ASR / FunASR Nano，走 stream.setOption("hotwords", csv)。 */
+        sessionHotwords: String = "",
         onLoadStart: (() -> Unit)? = null,
         onLoadDone: (() -> Unit)? = null,
     ): String? {
-        // 键盘预加载可能正在持锁；等待它完成比直接抛错更稳（说点啥统一交付流程的做法）。
+        // 先等上一次 native 释放结束（释放任务内部也要拿 mutex，持锁等会死锁），
+        // 再等键盘预加载持锁完成，比直接抛错更稳（说点啥统一交付流程的做法）。
+        awaitRelease()
         mutex.lock()
         val began = SystemClock.elapsedRealtime()
         return try {
             val cached = cachedRecognizer
-            val recognizer = if (cached != null && cachedKey == configKey) {
+            val recognizer = if (cached != null && cachedKey == configKey && !pendingUnload) {
                 Timber.d("sherpa offline model cache hit")
                 cached
             } else {
@@ -267,12 +333,20 @@ internal class SherpaOfflineManager {
                 cachedRecognizer = raw
                 cachedConfig = config
                 cachedKey = configKey
+                pendingUnload = false
                 onLoadDone?.invoke()
                 Timber.i("sherpa offline model loaded in %d ms", SystemClock.elapsedRealtime() - began)
                 raw
             }
-            val stream = recognizer.createStream()
+            // 每次会话可带热词（createStreamWithHotwords），无需重建识别器、不动缓存指纹。
+            val stream = recognizer.createStream(hotwords)
             try {
+                // LLM 架构：会话级覆盖词表（含光标前上下文），失败时 config.hotwords 里的
+                // 静态词表仍然生效，不影响识别。Transducer 不传（其实现不读 hotwords option）。
+                if (sessionHotwords.isNotEmpty()) {
+                    val ok = stream.setOption("hotwords", sessionHotwords)
+                    Timber.d("sherpa session hotwords applied=%s, chars=%d", ok, sessionHotwords.length)
+                }
                 stream.acceptWaveform(samples, sampleRate)
                 val text = recognizer.decode(stream)
                 Timber.i("sherpa decode done in %d ms, chars=%d", SystemClock.elapsedRealtime() - began, text?.length ?: 0)
@@ -311,8 +385,12 @@ class OfflineSherpaEngine(
     private val listener: AsrListener,
     private val familyId: String,
     private val model: ResolvedVoiceModel,
+    /** 本次会话热词，透传给 OfflineRecognizer.createStream(String)（Transducer 通道）。 */
+    private val hotwords: String = "",
     private val onLoadStart: () -> Unit = {},
     private val onLoadDone: () -> Unit = {},
+    /** 会话级词表（ASCII 逗号纯词表），走 stream.setOption("hotwords", csv)（LLM 通道）。 */
+    private val sessionHotwords: String = "",
 ) : AsrEngine {
     companion object {
         private val probeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -388,6 +466,8 @@ class OfflineSherpaEngine(
                     sampleRate = AudioRecorder.SAMPLE_RATE,
                     keepAliveMs = if (minutes <= 0) 0L else minutes.toLong() * 60_000L,
                     alwaysKeep = minutes < 0,
+                    hotwords = hotwords,
+                    sessionHotwords = sessionHotwords,
                     onLoadStart = onLoadStart,
                     onLoadDone = onLoadDone,
                 )
@@ -466,6 +546,9 @@ class OfflineSherpaEngine(
             sherpaTrySetField(q, "tokenizer", tokenizerDir)
             sherpaTrySetField(q, "maxTotalLen", 512)
             sherpaTrySetField(q, "maxNewTokens", 512)
+            // LLM 架构原生支持自然语言热词/上下文；只放静态自定义热词，
+            // 会随会话变化的内容走 createStream(String)，避免指纹抖动导致每次冷加载。
+            sherpaTrySetField(q, "hotwords", VoiceHotwords.staticNatural(context))
             val modelConfig = baseModelConfig("")
             sherpaTrySetField(modelConfig, "qwen3Asr", q)
             finalizeRecognizerConfig(modelConfig, withFeat = true)
@@ -480,6 +563,7 @@ class OfflineSherpaEngine(
             sherpaTrySetField(fn, "embedding", paths.getValue("embedding.int8.onnx"))
             sherpaTrySetField(fn, "tokenizer", tokenizerDir)
             sherpaTrySetField(fn, "userPrompt", "语音转写：")
+            sherpaTrySetField(fn, "hotwords", VoiceHotwords.staticNatural(context))
             sherpaTrySetField(fn, "language", LocalVoiceSettings.language(context, familyId))
             sherpaTrySetField(fn, "itn", LocalVoiceSettings.isItn(context, familyId))
             val modelConfig = baseModelConfig("")
@@ -543,6 +627,9 @@ class OfflineSherpaEngine(
         append("|threads=").append(LocalVoiceSettings.threads(context, familyId))
         append("|itn=").append(LocalVoiceSettings.isItn(context, familyId))
         append("|lang=").append(LocalVoiceSettings.language(context, familyId))
+        // 热词不再进指纹：Qwen3-ASR / FunASR Nano 走 stream.setOption("hotwords", csv)
+        // 每次会话覆盖，词库改动、光标前上下文变化都不需要重建几百 MB 的识别器。
+        // config.hotwords 里保留的静态词表只是兜底，不参与缓存键。
         append("|provider=cpu")
     }
 

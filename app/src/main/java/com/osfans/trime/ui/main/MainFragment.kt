@@ -93,6 +93,11 @@ class MainFragment : PaddingPreferenceFragment() {
                     NavigationRoute.LocalAsr,
                 )
                 addDestinationPreference(
+                    R.string.handwriting_settings,
+                    R.drawable.ic_baseline_edit_24,
+                    NavigationRoute.Handwriting,
+                )
+                addDestinationPreference(
                     R.string.advanced,
                     R.drawable.ic_baseline_more_horiz_24,
                     NavigationRoute.Advanced,

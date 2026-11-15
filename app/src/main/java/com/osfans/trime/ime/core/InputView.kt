@@ -41,6 +41,7 @@ import com.osfans.trime.ime.broadcast.InputBroadcaster
 import com.osfans.trime.ime.candidates.compact.CompactCandidateDelegate
 import com.osfans.trime.ime.candidates.popup.PopupCandidatesMode
 import com.osfans.trime.ime.composition.PreeditDelegate
+import com.osfans.trime.ime.handwriting.HandwritingWindow
 import com.osfans.trime.ime.keyboard.CommonKeyboardActionListener
 import com.osfans.trime.ime.keyboard.KeyboardLayoutMode
 import com.osfans.trime.ime.keyboard.KeyboardLayoutState
@@ -876,7 +877,12 @@ class InputView(
     ) {
         updateEnterKeyLabel(info)
         broadcaster.onStartInput(info)
-        if (!restarting) {
+        val inHandwriting = windowManager.currentWindowIs(HandwritingWindow::class.java)
+        val willSwitchBack = !restarting && !inHandwriting
+        // 宿主 App（QQ 等）在文本变化后会重启一次输入连接；若此时用户正在手写面板里书写，
+        // 无条件切回 KeyboardWindow 会让笔迹和候选瞬间消失，看起来像「写完直接跳回键盘」。
+        // 手写是临时面板，保持它，让识别流程继续；其他窗口沿用原有行为。
+        if (willSwitchBack) {
             windowManager.attachWindow(KeyboardWindow)
         }
     }
@@ -890,7 +896,10 @@ class InputView(
             is RimeMessage.SchemaMessage -> {
                 broadcaster.onRimeSchemaUpdated(it.data)
 
-                windowManager.attachWindow(KeyboardWindow)
+                // 方案切换时不要把正在书写的手写面板踢回键盘。
+                if (!windowManager.currentWindowIs(HandwritingWindow::class.java)) {
+                    windowManager.attachWindow(KeyboardWindow)
+                }
             }
 
             is RimeMessage.OptionMessage -> {

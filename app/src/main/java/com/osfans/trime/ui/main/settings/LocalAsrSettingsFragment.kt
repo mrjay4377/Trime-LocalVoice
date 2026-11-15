@@ -54,6 +54,8 @@ import com.osfans.trime.ime.voice.ModelVariant
 import com.osfans.trime.ime.voice.OfflineTranslator
 import com.osfans.trime.ime.voice.VoiceLifecycle
 import com.osfans.trime.core.data.UserDataManager
+import com.osfans.trime.ime.voice.VoiceCorrections
+import com.osfans.trime.ime.voice.VoiceHotwordBook
 import com.osfans.trime.ime.voice.VoiceModels
 import com.osfans.trime.ui.common.PaddingPreferenceFragment
 import io.github.yinvoker.foxlet.LanguagePair
@@ -88,6 +90,8 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     private var translateDirectionPreference: ListPreference? = null
     private var translatePacksPreference: Preference? = null
     private var unloadDelayPreference: ListPreference? = null
+    private var hotwordsCustomPreference: Preference? = null
+    private var correctionsPreference: Preference? = null
     private var modelsPreference: Preference? = null
     private var deletePreference: Preference? = null
     private var userDirPreference: SwitchPreferenceCompat? = null
@@ -380,6 +384,155 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                     setOnPreferenceChangeListener { _, newValue ->
                         LocalVoiceSettings.setPowerSave(ctx, newValue as Boolean)
                         refresh(ctx)
+                        true
+                    }
+                },
+            )
+
+            addPreference(category(ctx, KEY_CATEGORY_HOTWORDS, "热词与上下文提示"))
+
+            addPreference(
+                SwitchPreferenceCompat(ctx).apply {
+                    key = KEY_HOTWORDS
+                    title = "热词与上下文提示"
+                    summary = "把统一词库文件（voice/hotwords.txt）、Rime 用户词库与光标前文字交给本地识别引擎，全程离线。Qwen3-ASR / FunASR Nano 完整支持；流式 Zipformer / Parakeet 走 Transducer 通道；SenseVoice / Paraformer / CTC 架构不支持热词"
+                    isIconSpaceReserved = false
+                    isChecked = LocalVoiceSettings.isHotwordsEnabled(ctx)
+                    setOnPreferenceChangeListener { _, newValue ->
+                        LocalVoiceSettings.setHotwordsEnabled(ctx, newValue as Boolean)
+                        refresh(ctx)
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                Preference(ctx).apply {
+                    key = KEY_HOTWORDS_CUSTOM
+                    title = "编辑热词 / 上下文词库"
+                    summary = hotwordsSummary(ctx)
+                    isIconSpaceReserved = false
+                    hotwordsCustomPreference = this
+                    setOnPreferenceClickListener {
+                        showHotwordsBookDialog(ctx)
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                Preference(ctx).apply {
+                    key = KEY_HOTWORDS_BOOK_RELOAD
+                    title = "重新载入词库文件"
+                    summary = "在文件管理器里改完 hotwords.txt 后点这里，立即读进内存"
+                    isIconSpaceReserved = false
+                    setOnPreferenceClickListener {
+                        VoiceHotwordBook.reload(ctx, force = true)
+                        hotwordsCustomPreference?.summary = hotwordsSummary(ctx)
+                        toast(ctx, "已载入 ${VoiceHotwordBook.wordCount()} 条词条")
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                Preference(ctx).apply {
+                    key = KEY_HOTWORDS_BOOK_IMPORT
+                    title = "从 Rime 用户词库导入"
+                    summary = "把当前用户词典快照里还没有的词追加写入 hotwords.txt，一次性固化"
+                    isIconSpaceReserved = false
+                    setOnPreferenceClickListener {
+                        lifecycleScope.launch {
+                            val added = withContext(Dispatchers.IO) { VoiceHotwordBook.importFromRime(ctx) }
+                            hotwordsCustomPreference?.summary = hotwordsSummary(ctx)
+                            toast(ctx, if (added > 0) "已导入 $added 条词条" else "没有新词可导入")
+                        }
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                Preference(ctx).apply {
+                    key = KEY_HOTWORDS_BOOK_PATH
+                    title = "复制词库文件路径"
+                    summary = displayPath(ctx, VoiceHotwordBook.filePath(ctx))
+                    isIconSpaceReserved = false
+                    setOnPreferenceClickListener {
+                        copyPath(ctx, VoiceHotwordBook.filePath(ctx))
+                        true
+                    }
+                },
+            )
+
+            addPreference(category(ctx, KEY_CATEGORY_CORRECTIONS, "识别结果纠错（全部模型）"))
+
+            addPreference(
+                SwitchPreferenceCompat(ctx).apply {
+                    key = KEY_CORRECTIONS_ENABLED
+                    title = "启用文本层纠错"
+                    summary = "识别原文上屏前按「错词=正词」表替换一次。不依赖 ASR 架构，默认 SenseVoice / Paraformer / CTC 也能生效；只改本次识别结果，不动已上屏的文字"
+                    isIconSpaceReserved = false
+                    isChecked = LocalVoiceSettings.isVoiceCorrectionsEnabled(ctx)
+                    setOnPreferenceChangeListener { _, newValue ->
+                        LocalVoiceSettings.setVoiceCorrectionsEnabled(ctx, newValue as Boolean)
+                        refresh(ctx)
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                Preference(ctx).apply {
+                    key = KEY_CORRECTIONS_EDIT
+                    title = "编辑纠错词库"
+                    summary = correctionsSummary(ctx)
+                    isIconSpaceReserved = false
+                    correctionsPreference = this
+                    setOnPreferenceClickListener {
+                        showCorrectionsDialog(ctx)
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                Preference(ctx).apply {
+                    key = KEY_CORRECTIONS_RELOAD
+                    title = "重新载入纠错词库"
+                    summary = "在文件管理器里改完 corrections.txt 后点这里，立即读进内存"
+                    isIconSpaceReserved = false
+                    setOnPreferenceClickListener {
+                        VoiceCorrections.reload(ctx, force = true)
+                        correctionsPreference?.summary = correctionsSummary(ctx)
+                        toast(ctx, "已载入 ${VoiceCorrections.ruleCount()} 条规则")
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                Preference(ctx).apply {
+                    key = KEY_CORRECTIONS_PATH
+                    title = "复制纠错词库路径"
+                    summary = displayPath(ctx, VoiceCorrections.file(ctx).absolutePath)
+                    isIconSpaceReserved = false
+                    setOnPreferenceClickListener {
+                        copyPath(ctx, VoiceCorrections.file(ctx).absolutePath)
+                        true
+                    }
+                },
+            )
+
+            addPreference(
+                SwitchPreferenceCompat(ctx).apply {
+                    key = KEY_HOTWORDS_CONTEXT
+                    title = "使用输入框上下文"
+                    summary = "开始识别时读取光标前 120 字作为上下文提示，不上传、不保存"
+                    isIconSpaceReserved = false
+                    isChecked = LocalVoiceSettings.isHotwordsContextEnabled(ctx)
+                    setOnPreferenceChangeListener { _, newValue ->
+                        LocalVoiceSettings.setHotwordsContextEnabled(ctx, newValue as Boolean)
                         true
                     }
                 },
@@ -1370,6 +1523,103 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             .show()
     }
 
+    /** 摘要显示统一词库文件的词条数与短路径，方便确认读的是哪一份。 */
+    private fun correctionsSummary(ctx: Context): String =
+        "当前 ${VoiceCorrections.ruleCount()} 条规则 · voice/corrections.txt"
+
+    /** 编辑「错词=正词」表；写回后立刻 force reload，绕开 mtime 精度问题。 */
+    private fun showCorrectionsDialog(ctx: Context) {
+        val pad = (16 * ctx.resources.displayMetrics.density).toInt()
+        val input =
+            EditText(ctx).apply {
+                setText(VoiceCorrections.text(ctx))
+                setSelection(text.length)
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                hint = "尧舜禹=姚顺雨"
+                maxLines = 14
+                isSingleLine = false
+                setHorizontallyScrolling(false)
+            }
+        val container =
+            LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(pad, pad / 2, pad, 0)
+                addView(
+                    input,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
+            }
+        AlertDialog.Builder(ctx)
+            .setTitle("识别结果纠错词库")
+            .setMessage(
+                "每行一条：错词=正词（也支持 => 或 →），# 后面是注释。\n" +
+                    "最长匹配优先，英文只在整词边界生效，替换结果不会被下一条规则再改一次。\n" +
+                    "文件：" + displayPath(ctx, VoiceCorrections.file(ctx).absolutePath)
+            )
+            .setView(container)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val ok = VoiceCorrections.saveText(ctx, input.text.toString())
+                correctionsPreference?.summary = correctionsSummary(ctx)
+                toast(ctx, if (ok) "纠错词库已保存" else "写入失败，请检查 voice 目录权限")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun hotwordsSummary(ctx: Context): String {
+        VoiceHotwordBook.ensureFresh(ctx)
+        val count = VoiceHotwordBook.wordCount()
+        val path = displayPath(ctx, VoiceHotwordBook.filePath(ctx))
+        return if (count == 0) "尚无词条 · $path" else "已载入 $count 条词条 · $path"
+    }
+
+    /** 编辑统一词库文件 voice/hotwords.txt 全文：每行一个词，# 开头为注释。 */
+    private fun showHotwordsBookDialog(ctx: Context) {
+        val current = VoiceHotwordBook.text(ctx)
+        val density = ctx.resources.displayMetrics.density
+        val pad = (20 * density).toInt()
+        val input =
+            EditText(ctx).apply {
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                setText(current)
+                setSelection(current.length)
+                hint = "张三\n同文输入法"
+                maxLines = 12
+                isSingleLine = false
+                setHorizontallyScrolling(false)
+            }
+        val container =
+            LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(pad, pad / 2, pad, 0)
+                addView(
+                    input,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
+            }
+        AlertDialog.Builder(ctx)
+            .setTitle("热词 / 上下文词库")
+            .setMessage(
+                "每行一个词，# 开头为注释；词条长度 2-12 字，识别时取前 60 条。\n" +
+                    "文件：" + displayPath(ctx, VoiceHotwordBook.filePath(ctx)) +
+                    "\n也可直接用文本编辑器改这个文件，改完点「重新载入词库文件」。"
+            )
+            .setView(container)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val ok = VoiceHotwordBook.saveText(ctx, input.text.toString())
+                hotwordsCustomPreference?.summary = hotwordsSummary(ctx)
+                toast(ctx, if (ok) "词库已保存" else "写入失败，请检查 voice 目录权限")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     /**
      * 界面上只显示短路径，避免 Android/data/…/files/rime/voice/… 一整串把设置项撑成好几行；
      * 复制到剪贴板的仍是完整绝对路径。
@@ -1417,6 +1667,8 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
 
         val family = LocalVoiceSettings.vendor(ctx)
         vendorPreference?.summary = buildEngineSummary(ctx, family)
+        hotwordsCustomPreference?.summary = hotwordsSummary(ctx)
+        correctionsPreference?.summary = correctionsSummary(ctx)
 
         // 咩版式：每项直接显示「当前：值」，说明不再塞进摘要。
         val threads = LocalVoiceSettings.threads(ctx, family).toString()
@@ -1606,6 +1858,18 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         const val KEY_TRANSLATE_PACKS = "lv_translate_packs"
         const val KEY_SAVE_RECORDING = "lv_save_recording"
         const val KEY_USAGE = "lv_usage"
+        const val KEY_CATEGORY_HOTWORDS = "lv_category_hotwords"
+        const val KEY_HOTWORDS = "lv_hotwords"
+        const val KEY_HOTWORDS_CUSTOM = "lv_hotwords_custom"
+        const val KEY_HOTWORDS_CONTEXT = "lv_hotwords_context"
+        const val KEY_HOTWORDS_BOOK_RELOAD = "lv_hotwords_book_reload"
+        const val KEY_HOTWORDS_BOOK_IMPORT = "lv_hotwords_book_import"
+        const val KEY_HOTWORDS_BOOK_PATH = "lv_hotwords_book_path"
+        const val KEY_CATEGORY_CORRECTIONS = "lv_category_corrections"
+        const val KEY_CORRECTIONS_ENABLED = "lv_corrections_enabled"
+        const val KEY_CORRECTIONS_EDIT = "lv_corrections_edit"
+        const val KEY_CORRECTIONS_RELOAD = "lv_corrections_reload"
+        const val KEY_CORRECTIONS_PATH = "lv_corrections_path"
         /** 模型存放位置：用户目录（使用者资料夹，native 可直接读取）。 */
         const val KEY_USER_DIR = "lv_user_dir"
         const val BIBI_REPO_URL = "https://github.com/BryceWG/BiBi-Keyboard"

@@ -59,6 +59,16 @@ SPDX-License-Identifier: GPL-3.0-or-later
                 android:resource="@xml/method" />
         </service>
 
+        <!--
+        手写 ONNX 推理隔离进程：ORT native 一旦在设备上 abort，只杀这个子进程，
+        键盘 IME 主进程不受影响。与 sherpa 语音的 1.28.2 core 也天然无符号冲突。
+        exported=false：仅本 App 内部 AIDL 绑定。
+        -->
+        <service
+            android:name=".ime.handwriting.HandwritingInferenceService"
+            android:process=":hw_infer"
+            android:exported="false" />
+
         <provider
             android:name=".provider.RimeDataProvider"
             android:authorities="${applicationId}.provider"

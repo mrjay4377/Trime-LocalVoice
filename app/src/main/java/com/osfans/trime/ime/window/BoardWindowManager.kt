@@ -31,6 +31,9 @@ class BoardWindowManager(override val di: DI) : DIAware {
     private var currentWindow: BoardWindow? = null
     private var currentView: View? = null
 
+    /** 当前显示的窗口。展开候选窗打开前用它记住「基底窗口」，收起时回到它（手写面板或键盘）。 */
+    val topWindow: BoardWindow? get() = currentWindow
+
     private fun prepareAnimation(
         exitAnimation: Transition?,
         enterAnimation: Transition?,
@@ -74,6 +77,9 @@ class BoardWindowManager(override val di: DI) : DIAware {
     fun attachWindow(window: BoardWindow) {
         if (window === currentWindow) {
             Timber.d("Skip attaching $window")
+            // 原来这里漏了 return，重复 attach 同一窗口会把视图 remove 再 add 一遍，
+            // 并触发一次无意义的 onDetached/onAttached（手写窗口的协程作用域会被 cancel）。
+            return
         }
         val newView =
             if (window is ResidentWindow) {
@@ -120,4 +126,7 @@ class BoardWindowManager(override val di: DI) : DIAware {
     val view: FrameLayout by lazy { context.frameLayout(R.id.input_window) }
 
     fun isAttached(window: BoardWindow) = currentWindow === window
+
+    /** 供上层在「输入连接重启」时判断当前是不是某个临时面板，避免把它无端切回键盘。 */
+    fun currentWindowIs(clazz: Class<*>): Boolean = clazz.isInstance(currentWindow)
 }

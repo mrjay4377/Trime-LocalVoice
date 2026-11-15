@@ -214,4 +214,49 @@ object LocalVoiceSettings {
     private val TRANSLATE_DIRECTIONS = setOf(
         "auto", "zh_en", "en_zh", "zh_ja", "zh_ko", "zh_fr", "zh_de", "zh_es", "zh_ru",
     )
+
+    // ---- 热词 / 上下文提示（全部本地处理，不联网） ----
+
+    /** 总开关：把自定义热词与光标前文字提供给 ASR（Rime 用户词库功能已移除）。 */
+    fun isHotwordsEnabled(context: Context): Boolean =
+        prefs(context).getBoolean("hotwords_enabled", true)
+
+    fun setHotwordsEnabled(context: Context, value: Boolean) {
+        prefs(context).edit().putBoolean("hotwords_enabled", value).apply()
+        // 热词改走会话级 setOption，不进 config 指纹，开关切换不需要重建识别器。
+    }
+
+    /**
+     * 「使用 Rime 用户词库」功能已按需求移除：设置页不再显示开关，后台不再每 30 分钟
+     * 导出用户词典快照，热词构建也不再注入词典词条。这里保留恒 false 的读取入口，
+     * 让 VoiceHotwords / VoiceLifecycle 的现有调用点无需改动、也不会被旧 prefs 打开。
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun isHotwordsDictEnabled(context: Context): Boolean = false
+
+    /** 是否把当前输入框光标前文字作为上下文提示。 */
+    fun isHotwordsContextEnabled(context: Context): Boolean =
+        prefs(context).getBoolean("hotwords_context_enabled", true)
+
+    fun setHotwordsContextEnabled(context: Context, value: Boolean) =
+        prefs(context).edit().putBoolean("hotwords_context_enabled", value).apply()
+
+    /** 用户自定义热词：逗号 / 顿号 / 空格 / 换行分隔。 */
+    fun hotwords(context: Context): String =
+        prefs(context).getString("hotwords_custom", "").orEmpty()
+
+    fun setHotwords(context: Context, value: String) {
+        prefs(context).edit().putString("hotwords_custom", value).apply()
+        // 旧版自定义热词已迁移到 hotwords.txt；这里只保留兼容读取，不再触发重建。
+    }
+
+    // ---- 识别结果文本纠错（文本层，覆盖全部模型家族，默认关） ----
+
+    /** 是否在识别原文上屏前应用 voice/corrections.txt 的「错词→正词」规则。 */
+    fun isVoiceCorrectionsEnabled(context: Context): Boolean =
+        prefs(context).getBoolean("voice_corrections_enabled", false)
+
+    fun setVoiceCorrectionsEnabled(context: Context, value: Boolean) =
+        prefs(context).edit().putBoolean("voice_corrections_enabled", value).apply()
+
 }

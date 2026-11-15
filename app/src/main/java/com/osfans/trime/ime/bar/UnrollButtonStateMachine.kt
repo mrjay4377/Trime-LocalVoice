@@ -33,6 +33,9 @@ object UnrollButtonStateMachine {
         }),
         UnrolledCandidatesAttached({
             from(ClickToAttachWindow) transitTo ClickToDetachWindow
+            // 手写模式打开展开窗时，手写面板 detach 会广播一次候选更新，可能先把按钮
+            // 推到 Hidden；补上 Hidden → ClickToDetachWindow，保证「再点一次」能收起。
+            from(Hidden) transitTo ClickToDetachWindow
         }),
         UnrolledCandidatesDetached({
             from(ClickToDetachWindow) transitTo Hidden on (UnrolledCandidatesEmpty to true)
