@@ -71,10 +71,10 @@ class SwitchOptionWindow(di: DI) :
             } else {
                 context.getString(R.string.floating_keyboard)
             }
-        // 与「悬浮键盘 · 已开启」一致：手写也是带状态文字的开关项。
-        // 状态取自持久化的手写功能开关（设置页「启用手写输入」共用），不依赖当前窗口，
-        // 因为宫格菜单本身就占着当前窗口，无法用 currentWindowIs 判断。
-        val handwritingOn = HandwritingSettings.isEnabled(context)
+        // 与「悬浮键盘 · 已开启」一致：状态反映「当前是否在手写面板」，
+        // 而不是设置页的功能总开关。这样在键盘里显示「已关闭」，进手写后显示「已开启」，
+        // 每次打开菜单都会按来源窗口重新计算，不会出现永远只显示「已开启」。
+        val handwritingOn = HandwritingSettings.isEnabled(context) && handwritingActive
         val handwritingLabel =
             context.getString(R.string.handwriting_settings) +
                 " · " + context.getString(
@@ -144,6 +144,13 @@ class SwitchOptionWindow(di: DI) :
 
     private val windowManager: BoardWindowManager by instance()
 
+    /**
+     * 菜单打开时记住「进来之前是不是手写面板」。
+     * BoardWindowManager 在 onAttached() 之后才把 currentWindow 换成菜单，
+     * 所以那一刻读到的 topWindow 仍是来源窗口；每次打开菜单都重新快照，状态不会丢。
+     */
+    private var handwritingActive = false
+
     /** 切换后回到键盘，让用户直接看到效果而不是停留在菜单页。 */
     private fun returnToKeyboard() {
         windowManager.attachWindow(KeyboardWindow)
@@ -182,22 +189,20 @@ class SwitchOptionWindow(di: DI) :
             ) {
                 when (entry) {
                     is SwitchOptionEntry.Static -> when (entry.type) {
-                        // 开关语义与「悬浮键盘」一致：切换持久化的手写功能开关，并立刻给出效果。
-                        // 开启 → 直接进入手写面板；关闭 → 回到键盘（再进面板会提示已在设置里关闭）。
+                        // 与「悬浮键盘」一样是窗口开关：点一下进手写面板，已在手写时再点回键盘。
+                        // 不再改动设置页的功能总开关 —— 之前默认「已开启」时点一下会把手写关掉并退回键盘。
                         SwitchOptionEntry.Static.Type.Handwriting -> {
-                            val nextOn = !HandwritingSettings.isEnabled(context)
-                            HandwritingSettings.setEnabled(context, nextOn)
-                            Toast
-                                .makeText(
-                                    service,
-                                    if (nextOn) R.string.handwriting_switch_on else R.string.handwriting_switch_off,
-                                    Toast.LENGTH_SHORT,
-                                ).show()
-                            refreshEntries()
-                            if (nextOn) {
-                                windowManager.attachWindow(HandwritingWindow(di))
-                            } else {
+                            if (!HandwritingSettings.isEnabled(context)) {
+                                Toast
+                                    .makeText(
+                                        service,
+                                        "手写输入已在设置里关闭（设置 → 手写输入 可开启）",
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                            } else if (handwritingActive) {
                                 windowManager.attachWindow(KeyboardWindow)
+                            } else {
+                                windowManager.attachWindow(HandwritingWindow(di))
                             }
                         }
 
@@ -396,6 +401,9 @@ class SwitchOptionWindow(di: DI) :
 
     override fun onAttached() {
         KeyboardLayoutState.attach(service)
+        // attachWindow 先调 onAttached() 再更新 currentWindow，所以此刻 topWindow 仍是来源窗口：
+        // 从手写面板进来 = 已开启，从键盘进来 = 已关闭。每次打开菜单都重算，状态不会丢。
+        handwritingActive = windowManager.topWindow is HandwritingWindow
         rime.launchOnReady { api ->
             val data = api.currentSchema().switches
             service.lifecycleScope.launch {

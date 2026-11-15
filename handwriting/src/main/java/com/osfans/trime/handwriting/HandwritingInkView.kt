@@ -18,6 +18,9 @@ class HandwritingInkView(context: Context) : View(context) {
     /** 每次抬笔回调；面板在这里安排一次防抖识别。 */
     var onStrokeFinished: (() -> Unit)? = null
 
+    /** 用户开始落笔（ACTION_DOWN）时回调：用于自动收起临时打开的字符面板。 */
+    var onWriteStart: (() -> Unit)? = null
+
     private val strokes = mutableListOf<InkStroke>()
     private val finishedPaths = mutableListOf<Path>()
     private var currentPoints = mutableListOf<Pair<Float, Float>>()
@@ -78,6 +81,8 @@ class HandwritingInkView(context: Context) : View(context) {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
+                // 先通知面板收起临时字符面板；这一笔照常写入，不消费掉用户的落笔。
+                onWriteStart?.invoke()
                 currentPoints = mutableListOf()
                 currentPath = Path()
                 addPoint(event.x, event.y, start = true)

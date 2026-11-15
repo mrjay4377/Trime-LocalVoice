@@ -5,8 +5,10 @@
  * 白屏修复：主题颜色解析在配色链缺失时会抛异常，协程未捕获异常会杀掉 IME 进程；
  * 这里统一改成「视图永远可见 + 异常可见化 + native 延后到首次落笔」。
  *
- * 布局按参考图：中间大书写区 + 右侧竖列（，。？！ 删除）+ 底部一行
- * （符号 / 123 / 空格 / ABC / 换行）；顶部细条保留「撤销一笔 / 清空 / 返回键盘」与错误提示。
+ * 布局：中间大书写区 + 右侧竖列（撤销 / 清空 / 删除）+ 底部一行
+ * （符号 / 123 / 空格 / ABC / 换行）。中间行与底行共用 5.5 权重，右侧列占 1 份，
+ * 与「换行」键同宽且右对齐，上下连成一条直线；顶部细条只留状态文字与「返回键盘」。
+ * 符号 / 123 / ABC 会临时展开字符面板，点「返回」或在书写区落笔都自动收起。
  * 正常状态下状态条为空，不再显示「候选已显示在上方候选栏（点候选上屏）」这类提示。
  *
  * 候选只显示在键盘上方的主候选栏（InputBarDelegate / CompactCandidateDelegate 读
@@ -123,6 +125,12 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
     private var btnTextColor = 0
     private var keyBgColor = 0
     private var keyTextColor = 0
+
+    /** 符号 / 123 / ABC 的临时字符面板是否展开；展开时落笔会自动收起。 */
+    private var charPanelOpen = false
+
+    /** 底部容器收起时的高度（与「换行」所在主行一致）。 */
+    private var bottomCollapsedPx = 0
 
     private fun safeStatus(text: String) {
         runCatching {
@@ -247,6 +255,8 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
                         setStroke((1 * d).toInt(), 0xFF9AA0A6.toInt())
                     }
                 onStrokeFinished = { scheduleRecognize() }
+                // 字符面板是临时状态：用户直接在书写区落笔就自动收起，不用去找「返回」。
+                onWriteStart = { if (charPanelOpen) showBottomMain() }
             }
 
         val topBar =
@@ -258,41 +268,44 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
                     statusView,
                     LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
                 )
-                listOf<Pair<String, () -> Unit>>(
-                    "撤销一笔" to { inkView.undo() },
-                    "清空" to { clearInk() },
-                    "返回键盘" to { windowManager.attachWindow(KeyboardWindow) },
-                ).forEach { (label, action) ->
-                    addView(
-                        keyButton(label, action, btnBgColor, btnTextColor, 11f),
-                        LinearLayout
-                            .LayoutParams(
-                                LinearLayout.LayoutParams.WRAP_CONTENT,
-                                (26 * d).toInt(),
-                            ).apply { setMargins(gap, gap, gap, gap) },
-                    )
-                }
+                // 撤销 / 清空移到右侧竖列，顶部不再重复，只保留退出入口与状态文字。
+                addView(
+                    keyButton(
+                        "返回键盘",
+                        { windowManager.attachWindow(KeyboardWindow) },
+                        btnBgColor,
+                        btnTextColor,
+                        11f,
+                    ),
+                    LinearLayout
+                        .LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            (26 * d).toInt(),
+                        ).apply { setMargins(gap, gap, gap, gap) },
+                )
             }
 
-        // 右侧竖列：，。？！ 四个标点 + 删除，按参考图等分高度。
+        // 右侧竖列：撤销 / 清空 / 删除，三个等分高度。整列占 1 份权重，与「换行」键同宽。
         val rightColumn =
             LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 setBackgroundColor(solidBg)
-                listOf("，", "。", "？", "！", "删除").forEachIndexed { i, ch ->
-                    val weight = if (i == 4) 1.5f else 1f
-                    val bg = if (i == 4) btnBgColor else keyBgColor
-                    val fg = if (i == 4) btnTextColor else keyTextColor
-                    val action: () -> Unit =
-                        if (i == 4) {
-                            { deleteChar() }
-                        } else {
-                            { commitChar(ch) }
-                        }
+                listOf<Pair<String, () -> Unit>>(
+                    "撤销" to { inkView.undo() },
+                    "清空" to { clearInk() },
+                    "删除" to { deleteChar() },
+                ).forEach { (label, action) ->
+                    val isDelete = label == "删除"
                     addView(
-                        keyButton(ch, action, bg, fg, if (i == 4) 13f else 16f),
+                        keyButton(
+                            label,
+                            action,
+                            if (isDelete) btnBgColor else keyBgColor,
+                            if (isDelete) btnTextColor else keyTextColor,
+                            13f,
+                        ),
                         LinearLayout
-                            .LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, weight)
+                            .LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
                             .apply { setMargins(gap, gap, gap, gap) },
                     )
                 }
@@ -304,27 +317,30 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
                 orientation = LinearLayout.HORIZONTAL
                 setBackgroundColor(solidBg)
             }
-        addBottomKey(bottomMain, "符号", { showCharStrip(SYMBOLS) }, 1f, btnBgColor, btnTextColor)
-        addBottomKey(bottomMain, "123", { showCharStrip(NUMBERS) }, 1f, keyBgColor, keyTextColor)
+        addBottomKey(bottomMain, "符号", { showCharStrip(SYMBOLS, "符号") }, 1f, btnBgColor, btnTextColor)
+        addBottomKey(bottomMain, "123", { showCharStrip(NUMBERS, "数字") }, 1f, keyBgColor, keyTextColor)
         addBottomKey(bottomMain, "空格", { commitChar(" ") }, 1.5f, keyBgColor, keyTextColor)
-        addBottomKey(bottomMain, "ABC", { showCharStrip(LETTERS) }, 1f, keyBgColor, keyTextColor)
+        addBottomKey(bottomMain, "ABC", { showCharStrip(LETTERS, "字母") }, 1f, keyBgColor, keyTextColor)
         addBottomKey(bottomMain, "换行", { service.handleReturnKey() }, 1f, btnBgColor, btnTextColor)
 
+        bottomCollapsedPx = (48 * d).toInt()
         bottomHost = FrameLayout(context).apply { setBackgroundColor(solidBg) }
         showBottomMain()
 
+        // 中间行和底行都按 5.5 份权重切分：书写区 4.5 + 右侧列 1，
+        // 底行 1 + 1 + 1.5 + 1 + 1（换行）。因此右侧列与「换行」键同宽、右对齐。
         val middle =
             LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 setBackgroundColor(solidBg)
                 addView(
                     inkView,
-                    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
-                        .apply { setMargins(gap, 0, 0, gap) },
+                    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 4.5f)
+                        .apply { setMargins(gap, gap, 0, gap) },
                 )
                 addView(
                     rightColumn,
-                    LinearLayout.LayoutParams((54 * d).toInt(), LinearLayout.LayoutParams.MATCH_PARENT),
+                    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f),
                 )
             }
 
@@ -341,59 +357,111 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
             )
             addView(
                 bottomHost,
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (48 * d).toInt()),
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, bottomCollapsedPx),
             )
         }
     }
 
-    /** 符号 / 123 / ABC 换成可横向滚动的字符条，点字符直接上屏，点「返回」回到主行。 */
-    private fun showCharStrip(chars: List<String>) {
+    /**
+     * 符号 / 123 / ABC：把底部临时展开成两行字符面板，点字符直接上屏。
+     * 「返回」固定在右侧不随横向滚动跑掉；在书写区落笔同样会自动收起（inkView.onWriteStart）。
+     */
+    private fun showCharStrip(
+        chars: List<String>,
+        title: String,
+    ) {
         if (!::bottomHost.isInitialized) return
         val d = context.resources.displayMetrics.density
         val gap = (3 * d).toInt()
-        val row =
+        val keyW = (42 * d).toInt()
+        val rowH = (40 * d).toInt()
+        val backW = (58 * d).toInt()
+        val half = (chars.size + 1) / 2
+
+        val grid =
             LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                chars.forEach { ch ->
+                orientation = LinearLayout.VERTICAL
+                listOf(chars.take(half), chars.drop(half)).forEach { line ->
+                    val row =
+                        LinearLayout(context).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            line.forEach { ch ->
+                                addView(
+                                    keyButton(ch, { commitChar(ch) }, keyBgColor, keyTextColor, 15f),
+                                    LinearLayout
+                                        .LayoutParams(keyW, LinearLayout.LayoutParams.MATCH_PARENT)
+                                        .apply { setMargins(gap, gap, gap, gap) },
+                                )
+                            }
+                        }
                     addView(
-                        keyButton(ch, { commitChar(ch) }, keyBgColor, keyTextColor),
-                        LinearLayout
-                            .LayoutParams((40 * d).toInt(), LinearLayout.LayoutParams.MATCH_PARENT)
-                            .apply { setMargins(gap, gap, gap, gap) },
+                        row,
+                        LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            rowH,
+                        ),
                     )
                 }
-                addView(
-                    keyButton("返回", { showBottomMain() }, btnBgColor, btnTextColor, 13f),
-                    LinearLayout
-                        .LayoutParams((56 * d).toInt(), LinearLayout.LayoutParams.MATCH_PARENT)
-                        .apply { setMargins(gap, gap, gap, gap) },
-                )
             }
         val scroll =
             HorizontalScrollView(context).apply {
                 isHorizontalScrollBarEnabled = false
-                addView(row)
+                addView(
+                    grid,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+            }
+        val panel =
+            LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                contentDescription = title
+                addView(
+                    scroll,
+                    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f),
+                )
+                addView(
+                    keyButton("返回", { showBottomMain() }, btnBgColor, btnTextColor, 13f),
+                    LinearLayout
+                        .LayoutParams(backW, LinearLayout.LayoutParams.MATCH_PARENT)
+                        .apply { setMargins(gap, gap, gap, gap) },
+                )
             }
         bottomHost.removeAllViews()
         bottomHost.addView(
-            scroll,
+            panel,
             FrameLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
             ),
         )
+        setBottomHeight(rowH * 2 + gap * 2)
+        charPanelOpen = true
     }
 
+    /** 回到主底行；字符面板是临时状态，收起后书写区恢复全高。 */
     private fun showBottomMain() {
         if (!::bottomHost.isInitialized || !::bottomMain.isInitialized) return
         bottomHost.removeAllViews()
         bottomHost.addView(
             bottomMain,
             FrameLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
             ),
         )
+        setBottomHeight(bottomCollapsedPx)
+        charPanelOpen = false
+    }
+
+    /** 底部容器尚未挂到父布局时（buildView 阶段）layoutParams 为空，此时交给外层设定高度。 */
+    private fun setBottomHeight(px: Int) {
+        val lp = bottomHost.layoutParams as? LinearLayout.LayoutParams ?: return
+        if (lp.height == px) return
+        lp.height = px
+        bottomHost.layoutParams = lp
     }
 
     private fun commitChar(text: String) {
