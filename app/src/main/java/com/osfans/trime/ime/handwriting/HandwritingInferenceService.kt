@@ -14,6 +14,7 @@ import android.app.Service
 import android.content.Intent
 import android.os.IBinder
 import com.osfans.trime.handwriting.HandwritingModels
+import java.io.File
 import com.osfans.trime.handwriting.InkStroke
 import com.osfans.trime.handwriting.OnnxInkRecognizer
 import com.osfans.trime.handwriting.StrokeSegmenter
@@ -22,9 +23,16 @@ import org.json.JSONObject
 import timber.log.Timber
 
 class HandwritingInferenceService : Service() {
+    companion object {
+        const val EXTRA_MODEL_DIR = "model_dir"
+    }
+
     @Volatile private var segmenter: StrokeSegmenter? = null
 
     @Volatile private var loadError: String? = null
+
+    /** 绑定时由主进程传入的模型目录绝对路径；为空则回退服务自身解析（兼容旧调用）。 */
+    @Volatile private var modelDir: File? = null
 
     private val binder =
         object : IHandwritingInference.Stub() {
@@ -65,8 +73,11 @@ class HandwritingInferenceService : Service() {
         val existing = segmenter
         if (existing != null) return existing
         return try {
-            val model = HandwritingModels.modelFile(this)
-            val index = HandwritingModels.charIndex(this)
+            // 优先用主进程绑定时传入的目录；子进程 prefs 缓存可能与主进程不一致，
+            // 通过 Intent 传绝对路径是跨进程最可靠的做法。
+            val dir = modelDir
+            val model = if (dir != null) HandwritingModels.modelFileIn(dir) else HandwritingModels.modelFile(this)
+            val index = if (dir != null) HandwritingModels.charIndexFile(HandwritingModels.indexFileIn(dir)) else HandwritingModels.charIndex(this)
             // 字表为空时不要静默跑推理：ORT 会算完 7356 维 logits，但 topK 索引查不到字，
             // 结果永远是 0 候选、界面只显示「未识别到文字」。这里直接给出可读错误。
             if (index.isEmpty()) {
@@ -79,6 +90,7 @@ class HandwritingInferenceService : Service() {
                 runCatching { engine.close() }
                 null
             } else {
+                lastLoadedModelPath = model.absolutePath
                 StrokeSegmenter(engine).also { segmenter = it }
             }
         } catch (t: Throwable) {
@@ -106,7 +118,21 @@ class HandwritingInferenceService : Service() {
         return out
     }
 
-    override fun onBind(intent: Intent?): IBinder = binder
+    override fun onBind(intent: Intent?): IBinder {
+        val path = intent?.getStringExtra(EXTRA_MODEL_DIR).orEmpty()
+        modelDir = path.takeIf { it.isNotEmpty() }?.let { File(it) }
+        // 存储位置可能在服务复用期间改变：换目录就释放旧 segmenter，让下次识别按新目录重载。
+        modelDir?.let { dir ->
+            if (segmenter != null && HandwritingModels.modelFileIn(dir).absolutePath != lastLoadedModelPath) {
+                runCatching { segmenter?.close() }
+                segmenter = null
+                loadError = null
+            }
+        }
+        return binder
+    }
+
+    @Volatile private var lastLoadedModelPath: String? = null
 
     override fun onUnbind(intent: Intent?): Boolean {
         // 客户端解绑后释放 ORT，避免常驻占用内存；下次进入会重新加载。

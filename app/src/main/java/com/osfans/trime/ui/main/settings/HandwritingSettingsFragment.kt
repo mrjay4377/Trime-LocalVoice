@@ -2,9 +2,10 @@
  * 手写输入独立设置页：与「本地语音识别」完全分开。
  * 模型下载、目录、开关都走 :handwriting 模块自己的 API，不再触碰语音设置。
  *
- * 「候选提示码」列出 Rime 部署目录里全部 *.dict.yaml（排除随包 luna_pinyin），
- * default.custom.yaml 中启用的方案排在前面；用户选哪一份，手写候选旁就显示哪一份的编码。
- * 切换只在设置页进行；手写单字上屏后还会用这些字典的词组行给出联想词。
+ * 「候选提示码」列出 Rime 部署目录里已启用方案（default.custom.yaml 的 schema_list）
+ * 引用的字典；用户选哪一份，手写候选旁就显示哪一份的编码。未启用任何方案时，
+ * 弹窗只保留「关闭提示码」。切换只在设置页进行；手写单字上屏后还会用这些字典的词组行
+ * 给出联想词（已过滤掉与已上屏字重复拼接的词组）。
  */
 package com.osfans.trime.ui.main.settings
 
@@ -14,18 +15,23 @@ import android.content.Context
 import android.os.Bundle
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
+import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
 import androidx.preference.Preference
 import androidx.preference.SwitchPreferenceCompat
 import com.osfans.trime.handwriting.HandwritingModels
 import com.osfans.trime.handwriting.HandwritingSettings
 import com.osfans.trime.ime.handwriting.HandwritingCodeLookup
+import com.osfans.trime.ime.handwriting.HandwritingStorageBridge
 import com.osfans.trime.ui.common.PaddingPreferenceFragment
+import com.osfans.trime.ui.main.MainViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 class HandwritingSettingsFragment : PaddingPreferenceFragment() {
+    private val mainViewModel: MainViewModel by activityViewModels()
     private var modelPreference: Preference? = null
     private var pathPreference: Preference? = null
     private var codePreference: Preference? = null
@@ -84,6 +90,24 @@ class HandwritingSettingsFragment : PaddingPreferenceFragment() {
         )
 
         screen.addPreference(
+            SwitchPreferenceCompat(ctx).apply {
+                key = "hw_use_user_dir"
+                title = "模型存放位置：用户目录"
+                summary = "跟随使用者资料夹；关闭则固定应用私有目录"
+                isIconSpaceReserved = false
+                isChecked = HandwritingSettings.useUserDataDir(ctx)
+                setOnPreferenceChangeListener { _, value ->
+                    HandwritingSettings.setUseUserDataDir(ctx, value as Boolean)
+                    // 立即按新开关重算落点并迁移已有模型，避免重新下载。
+                    HandwritingStorageBridge.sync(ctx.applicationContext)
+                    HandwritingModels.migrateLegacy(ctx.applicationContext)
+                    refresh(ctx)
+                    true
+                }
+            },
+        )
+
+        screen.addPreference(
             Preference(ctx).apply {
                 key = "hw_path"
                 title = "复制模型目录"
@@ -111,13 +135,30 @@ class HandwritingSettingsFragment : PaddingPreferenceFragment() {
         refresh(ctx)
     }
 
-    /** 扫描部署目录放到 IO 线程；每次打开都刷新，用户重新部署方案后立刻能看到新方案。 */
+    /**
+     * 首选 Rime 引擎的权威启用方案列表（enabledSchemata，含 id+中文名）；引擎拿不到时退回文件解析
+     * （default.custom.yaml）。放 IO 线程扫部署目录；每次打开都刷新，重新部署后立即生效。
+     */
     private fun showCodeSourcePicker(ctx: Context) {
         lifecycleScope.launch {
+            // rime 未 ready 时 whenReady 会一直挂起；限时 1.5s，超时直接走内置方案，绝不卡住弹窗。
+            val enabled =
+                runCatching {
+                    withTimeout(1500) {
+                        mainViewModel.rime.runOnReady {
+                            enabledSchemata().map { it.id to it.name }
+                        }
+                    }
+                }.getOrNull()
+            timber.log.Timber.tag("HwCode").w("enabledSchemata=%s", enabled)
             val list =
                 withContext(Dispatchers.IO) {
                     HandwritingCodeLookup.invalidate()
-                    HandwritingCodeLookup.sources(ctx.applicationContext)
+                    if (enabled.isNullOrEmpty()) {
+                        HandwritingCodeLookup.sources(ctx.applicationContext)
+                    } else {
+                        HandwritingCodeLookup.sources(ctx.applicationContext, enabled)
+                    }
                 }
             if (!isAdded) return@launch
             val current = HandwritingSettings.codeSource(ctx)
@@ -125,13 +166,15 @@ class HandwritingSettingsFragment : PaddingPreferenceFragment() {
             val labels: Array<CharSequence> =
                 buildList<CharSequence> {
                     add("关闭提示码")
-                    list.forEach { add("${it.name}  ·  ${it.detail}") }
+                    list.forEach { add(it.name) }
                 }.toTypedArray()
+            // 兼容旧配置：current 可能是方案 id（新）或 dict 名（旧），两者都参与匹配。
             val checked =
-                list.indexOfFirst { it.id == current }.let { if (it < 0) 0 else it + 1 }
+                list.indexOfFirst { it.id == current || it.dictName == current }
+                    .let { if (it < 0) 0 else it + 1 }
             AlertDialog
                 .Builder(ctx)
-                .setTitle("候选提示码来源（Rime 已部署字典）")
+                .setTitle("候选提示码")
                 .setSingleChoiceItems(labels, checked) { dialog, which ->
                     val id =
                         if (which == 0) {
@@ -150,9 +193,13 @@ class HandwritingSettingsFragment : PaddingPreferenceFragment() {
     private fun downloadModel() {
         val app = requireContext().applicationContext
         downloading = true
-        toast("正在下载手写模型（约 6.7 MB）…")
+        toast("正在下载手写模型（约 2.1 MB）…")
         lifecycleScope.launch {
-            val ok = withContext(Dispatchers.IO) { HandwritingModels.download(app) }
+            val ok =
+                withContext(Dispatchers.IO) {
+                    HandwritingStorageBridge.sync(app)
+                    HandwritingModels.download(app)
+                }
             downloading = false
             if (isAdded) {
                 toast(
@@ -168,11 +215,20 @@ class HandwritingSettingsFragment : PaddingPreferenceFragment() {
     }
 
     private fun refresh(ctx: Context) {
+        // 按当前存储模式/权限刷新落点（使用者资料夹 ↔ 私有目录）。
+        val appliedPath = HandwritingStorageBridge.sync(ctx.applicationContext)
         modelPreference?.summary =
             if (HandwritingModels.isReady(ctx)) {
                 "已就绪 · ochwpro.onnx + char_index.json（MIT，可离线手写）"
             } else {
-                "未安装 · 点击下载约 6.7 MB，或按下面路径手动放置"
+                "未安装 · 点击下载约 2.1 MB，或按下面路径手动放置"
+            }
+        // 显示「模型存放位置」开关的真实状态，权限/资料夹未就绪时给出可操作提示。
+        findPreference<SwitchPreferenceCompat>("hw_use_user_dir")?.summary =
+            when {
+                !HandwritingSettings.useUserDataDir(ctx) -> "关闭 · 固定使用应用私有目录"
+                appliedPath.isEmpty() -> "需在「设置 → 数据位置」选择使用者资料夹并授予「所有文件访问权限」，才会放到用户目录"
+                else -> "当前：使用者资料夹（$appliedPath）"
             }
         pathPreference?.summary = HandwritingModels.dir(ctx).absolutePath
         val id = HandwritingSettings.codeSource(ctx)
@@ -180,7 +236,7 @@ class HandwritingSettingsFragment : PaddingPreferenceFragment() {
             if (id.isEmpty()) {
                 "关闭 · 候选旁不显示编码"
             } else {
-                "当前：$id（已部署字典，见设置页选择）"
+                "当前：$id（已启用方案的字典，候选旁显示其编码）"
             }
     }
 

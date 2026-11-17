@@ -7,9 +7,9 @@
  *
  * 布局：中间大书写区 + 右侧竖列（撤销 / 清空 / 删除）+ 底部一行
  * （符号 / 123 / 空格 / ABC / 换行）。中间行与底行共用 5.5 权重，右侧列占 1 份，
- * 与「换行」键同宽且右对齐，上下连成一条直线；顶部细条只留状态文字与「返回键盘」。
- * 符号 / 123 / ABC 会临时展开字符面板，点「返回」或在书写区落笔都自动收起。
- * 正常状态下状态条为空，不再显示「候选已显示在上方候选栏（点候选上屏）」这类提示。
+ * 与「换行」键同宽且右对齐，上下连成一条直线。顶部状态条已删除，面板直接从书写区开始。
+ * 符号 / 123 / ABC 会临时展开字符面板，在书写区落笔会自动收起。
+ * 退出手写面板改走「更多」菜单入口（手写输入项），面板内不再有「返回键盘」按钮。
  *
  * 候选只显示在键盘上方的主候选栏（InputBarDelegate / CompactCandidateDelegate 读
  * HandwritingCandidateBridge），面板内不再重复展示候选。
@@ -115,6 +115,14 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
 
     /** 当前选中的提示码来源（HandwritingCodeSource.id，空串 = 关闭），与设置页共用。 */
     private var codeSourceId: String = HandwritingCodeLookup.OFF
+
+    /**
+     * 上一次主候选上屏的文本（CyIME 式「补完」的前缀基准）。
+     * 联想词若以它为前缀，点上屏说明是补完该词（如「叶」→「叶子」），
+     * 需「替换」已上屏的 prefix 为完整词，而非整词追加（否则变「叶叶子」）。
+     * 写下一笔识别 / 退出面板时重置。
+     */
+    private var lastCommitted: String = ""
 
     private lateinit var inkView: HandwritingInkView
     private lateinit var statusView: TextView
@@ -259,32 +267,6 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
                 onWriteStart = { if (charPanelOpen) showBottomMain() }
             }
 
-        val topBar =
-            LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setBackgroundColor(solidBg)
-                addView(
-                    statusView,
-                    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
-                )
-                // 撤销 / 清空移到右侧竖列，顶部不再重复，只保留退出入口与状态文字。
-                addView(
-                    keyButton(
-                        "返回键盘",
-                        { windowManager.attachWindow(KeyboardWindow) },
-                        btnBgColor,
-                        btnTextColor,
-                        11f,
-                    ),
-                    LinearLayout
-                        .LayoutParams(
-                            LinearLayout.LayoutParams.WRAP_CONTENT,
-                            (26 * d).toInt(),
-                        ).apply { setMargins(gap, gap, gap, gap) },
-                )
-            }
-
         // 右侧竖列：撤销 / 清空 / 删除，三个等分高度。整列占 1 份权重，与「换行」键同宽。
         val rightColumn =
             LinearLayout(context).apply {
@@ -347,10 +329,6 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
         return LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(solidBg)
-            addView(
-                topBar,
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT),
-            )
             addView(
                 middle,
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f),
@@ -508,6 +486,10 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
             scope.launch {
                 HandwritingCodeLookup.warmUp(context, codeSourceId)
                 HandwritingCodeLookup.warmUpPhrases(context)
+                // 临时诊断：状态条显示码源解析结果，便于定位「设置好却没提示」。
+                mainHandler.post {
+                    safeStatus(HandwritingCodeLookup.diagnose(context, codeSourceId))
+                }
             }
             prepareModel()
             bindInference()
@@ -520,6 +502,8 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
     override fun onDetached() {
         Timber.i("handwriting: onDetached")
         recognizeJob?.cancel()
+        // 离开手写面板：补完基准失效，重置 lastCommitted，避免残留前缀在后续键盘输入时误触发替换。
+        lastCommitted = ""
         // 展开候选窗打开前会 suspendClear()；此时 clear() 是空操作，桥接仍 active。
         // 这种「临时让位」不能 cancel 协程作用域 / 解绑推理进程，否则收起回来手写直接失效。
         HandwritingCandidateBridge.clear()
@@ -537,6 +521,11 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
         binding = true
         runCatching {
             val intent = Intent(context, HandwritingInferenceService::class.java)
+            // 把当前解析出的模型目录绝对路径传给子进程，跨进程不用共享 prefs 缓存。
+            intent.putExtra(
+                HandwritingInferenceService.EXTRA_MODEL_DIR,
+                HandwritingModels.dir(context).absolutePath,
+            )
             context.bindService(intent, conn, Context.BIND_AUTO_CREATE)
         }.onFailure {
             binding = false
@@ -560,6 +549,8 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
         scope.launch {
             val state =
                 runCatching {
+                    // 先按当前存储模式/权限刷新模型落点（使用者资料夹 ↔ 私有目录），再迁移、再检查。
+                    HandwritingStorageBridge.sync(context)
                     HandwritingModels.migrateLegacy(context)
                     HandwritingModels.isReady(context) to HandwritingModels.dir(context).absolutePath
                 }.onFailure {
@@ -671,6 +662,9 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
 
     /** 识别完成只发布候选到主候选栏，状态条保持空白（按需求去掉面板提示）。 */
     private fun showCandidates(list: List<InkCandidate>) {
+        // 新一笔识别结果覆盖候选栏：上一段补完基准失效，重置 lastCommitted，
+        // 避免把旧 prefix 误当成本次候选的前缀做替换。
+        lastCommitted = ""
         publishToMainBar(list)
         safeStatus("")
     }
@@ -700,15 +694,38 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
 
     /** 点候选（主候选栏或展开候选窗）：上屏、清笔迹，随后显示联想词。 */
     private fun commitFromCandidate(text: String) {
-        val result = runCatching { service.commitText(text) }
+        // CyIME 式「补完」：上一次的已上屏文本是 prefix。
+        // 若本次候选以它开头（如 lastCommitted="叶"、text="叶子"），说明是补完该词：
+        // 需把编辑器里刚上的 prefix 替换成完整词（先删 prefix 再 commit 整词），
+        // 绝不能整词追加——否则 prefix + 整词 会变成「叶叶子」。
+        val prefix = lastCommitted
+        val isCompletion = text.startsWith(prefix) && prefix.isNotEmpty()
+        val result =
+            runCatching {
+                if (isCompletion) {
+                    val ic = service.currentInputConnection
+                    ic?.deleteSurroundingText(prefix.length, 0)
+                    service.commitText(text)
+                } else {
+                    service.commitText(text)
+                }
+                lastCommitted = text
+            }
         if (result.isFailure) {
             Timber.e(result.exceptionOrNull(), "handwriting: commit failed")
             safeStatus("上屏失败：" + errorHint(result.exceptionOrNull()) + "；候选仍在，可再点一次")
             return
         }
         runCatching { inkView.clear() }
-        // 联想词来自已部署字典的词组行，以上屏的最后一个字为首字；继续写下一笔会被识别结果覆盖。
-        val words = HandwritingCodeLookup.associations(text.lastOrNull())
+        // 联想词以「本词末字」为首字继续给下一段联想；保留补完词（点上屏走上面的替换分支），
+        // 只滤掉「==text」自重复项。
+        val committedLast = text.lastOrNull()
+        val rawWords = HandwritingCodeLookup.associations(committedLast)
+        val words = rawWords.filter { it != text }
+        Timber.tag("HwAssoc").w(
+            "assoc commit=%s prefix=%s completion=%b anchor=%s raw=%d kept=%d head=%s",
+            text, prefix, isCompletion, committedLast, rawWords.size, words.size, words.take(8),
+        )
         val arr = words.map { CandidateProto(it, "", "") }.toTypedArray()
         HandwritingCandidateBridge.publish(arr)
         refreshMainBar()

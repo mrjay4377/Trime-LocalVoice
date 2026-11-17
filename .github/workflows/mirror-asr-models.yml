@@ -1,0 +1,120 @@
+name: Mirror ASR models (BiBi -> this repo)
+
+# 在 GitHub 云端把 BiBi-Keyboard/models release 的模型 ZIP 转存到本仓 asr-models release。
+# 全程走 GitHub runner 网络，不经过本地代理。手动触发，可重复运行（--clobber 覆盖同名 asset）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: '只转存指定文件名（逗号分隔，留空=全部13个）'
+        required: false
+        default: ''
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve file list
+        id: files
+        shell: bash
+        run: |
+          set -euo pipefail
+          ALL=(
+            sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.zip
+            sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.zip
+            sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.zip
+            sherpa-onnx-qwen3-asr-1.7B-int8-2026-08-04.zip
+            sherpa-onnx-funasr-nano-int8-2025-12-30.zip
+            sherpa-onnx-funasr-mlt-nano-int8-2026-03-21.zip
+            sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.zip
+            sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.zip
+            sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25.zip
+            sherpa-onnx-telespeech-ctc-int8-zh-2024-06-04.zip
+            sherpa-onnx-streaming-x-asr-480ms-zh-en.zip
+            sherpa-onnx-streaming-paraformer-bilingual-zh-en.zip
+            sherpa-onnx-streaming-paraformer-trilingual-zh-cantonese-en.zip
+          )
+          ONLY="${{ github.event.inputs.only }}"
+          if [ -n "$ONLY" ]; then
+            printf '%s\n' "$ONLY" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -v '^$' > selected.txt
+            while IFS= read -r f; do
+              ok=0
+              for a in "${ALL[@]}"; do [ "$a" = "$f" ] && ok=1; done
+              [ "$ok" -eq 1 ] || { echo "Unknown model file: $f" >&2; exit 1; }
+            done < selected.txt
+          else
+            printf '%s\n' "${ALL[@]}" > selected.txt
+          fi
+          echo "count=$(wc -l < selected.txt)" >> "$GITHUB_OUTPUT"
+          cat selected.txt
+
+      - name: Download from BiBi release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          BASE="https://github.com/BryceWG/BiBi-Keyboard/releases/download/models"
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            echo "=== downloading $f ==="
+            curl -fL --retry 3 --retry-delay 5 --connect-timeout 30 \
+              -o "models/$f" "$BASE/$f"
+            printf '%s  %s bytes\n' "$f" "$(stat -c %s "models/$f")"
+          done < selected.txt
+          echo "=== downloaded total ==="
+          du -sh models
+
+      - name: Verify sizes against source release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api repos/BryceWG/BiBi-Keyboard/releases/tags/models \
+            --jq '.assets[] | [.name, (.size|tostring)] | @tsv' > source_sizes.tsv
+          fail=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            want=$(awk -F '\t' -v n="$f" '$1==n{print $2}' source_sizes.tsv)
+            got=$(stat -c %s "models/$f")
+            if [ "$want" = "$got" ]; then
+              echo "OK   $f ($got)"
+            else
+              echo "FAIL $f want=$want got=$got" >&2
+              fail=1
+            fi
+          done < selected.txt
+          [ "$fail" -eq 0 ]
+
+      - name: Ensure target release exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release view asr-models >/dev/null 2>&1; then
+            gh release create asr-models --title "ASR Models (self-hosted mirror)" \
+              --notes "Mirror of BiBi-Keyboard/models release assets used by this fork, plus two self-packed streaming models." \
+              --prerelease
+          fi
+          gh release view asr-models --json name,assets --jq '.name, (.assets[].name)'
+
+      - name: Upload to this repo release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            echo "=== uploading $f ==="
+            gh release upload asr-models "models/$f" --clobber --repo "$GITHUB_REPOSITORY"
+          done < selected.txt

@@ -62,6 +62,12 @@ sealed class BoardWindow(override val di: DI) : DIAware {
 
         open fun onCreateBarView(): View? = null
 
+        /**
+         * QuickBar 返回按钮点击时调用。子类可自行决定返回目标（例如从手写面板进来的菜单，
+         * 返回时应回到手写面板而不是普通键盘）。返回 true 表示子类已处理，委托方不再做默认跳转。
+         */
+        open fun onBackPressed(): Boolean = false
+
         override fun toString(): String = javaClass.name
     }
 }

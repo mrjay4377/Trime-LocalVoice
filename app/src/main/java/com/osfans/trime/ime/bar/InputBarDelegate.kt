@@ -419,7 +419,11 @@ class InputBarDelegate(override val di: DI) :
             tabUi.setTitle(window.title)
             window.onCreateBarView()?.let { tabUi.addExternal(it, window.showTitle) }
             tabUi.setBackButtonOnClickListener {
-                windowManager.attachWindow(KeyboardWindow)
+                // 让菜单自己决定返回目标（从手写面板进来的「更多」菜单应回到手写面板）；
+                // 未处理时维持默认：回普通键盘。
+                if (!window.onBackPressed()) {
+                    windowManager.attachWindow(KeyboardWindow)
+                }
             }
             barStateMachine.push(QuickBarStateMachine.TransitionEvent.BarBoardWindowAttached)
         }

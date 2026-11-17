@@ -112,13 +112,17 @@ class SwitchOptionWindow(di: DI) :
                 R.drawable.ic_baseline_keyboard_24,
                 SwitchOptionEntry.Static.Type.Keyboard,
             ),
-            // icon 传 0 时宫格用「手」字作图标，无需新增 drawable。
-            SwitchOptionEntry.Static(
+        )
+        // 手写输入在设置里关闭时不在「更多」菜单显示这一格（只有开启才提示）。
+        // 例外：已经在手写面板里时仍保留，方便点它退回普通键盘。
+        // icon 传 0 时宫格用「手」字作图标，无需新增 drawable。
+        if (HandwritingSettings.isEnabled(context) || handwritingActive) {
+            entries += SwitchOptionEntry.Static(
                 handwritingLabel,
                 0,
                 SwitchOptionEntry.Static.Type.Handwriting,
-            ),
-        )
+            )
+        }
         // 单手模式下才出现「键盘宽度」三档，避免普通 / 悬浮模式的宫格被无用项占满。
         if (mode.isOneHand) {
             val current = KeyboardLayoutState.oneHandWidthPercent(context)
@@ -420,5 +424,17 @@ class SwitchOptionWindow(di: DI) :
     override fun onDetached() {
         popupMenu?.dismiss()
         popupMenu = null
+    }
+
+    /**
+     * 从手写面板打开「更多」菜单时，QuickBar 返回键应回到手写面板，而不是普通键盘。
+     * handwritingActive 在 onAttached() 里按来源窗口快照，进来前是手写面板则为 true。
+     */
+    override fun onBackPressed(): Boolean {
+        if (handwritingActive && HandwritingSettings.isEnabled(context)) {
+            windowManager.attachWindow(HandwritingWindow(di))
+            return true
+        }
+        return false
     }
 }

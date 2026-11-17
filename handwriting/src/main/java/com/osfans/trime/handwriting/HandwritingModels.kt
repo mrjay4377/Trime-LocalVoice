@@ -5,8 +5,12 @@
  *   https://github.com/ximeiorg/ochwpro
  *   https://www.modelscope.cn/models/bikeand/ochwpro
  * 1.72M 参数、7356 个汉字类、CASIA-OLHWDB 训练，Top-1 90.46%。
- * 权重与字表都不进 Git 仓库（约 6.7 MB + 51 KB），首次使用时下载到
+ * 权重与字表都不进 Git 仓库（INT8 约 2.1 MB + 51 KB），首次使用时下载到
  * 应用私有外部目录 /handwriting/，之后完全离线推理。
+ *
+ * 模型用官方导出的 INT8 动态量化版（ochwpro-int8.onnx）：接口与 FP32 完全一致
+ * （input[batch,200,5] / mask[batch,200] / logits[batch,7356]），体积从 7 MB 降到
+ * 2.1 MB、推理更快；本地文件名沿用 ochwpro.onnx，旧 FP32 因大小不符会自动重新下载。
  *
  * 目录刻意不叫 voice：手写是独立功能，模型不与语音模型混放，也不需要
  * 「使用者资料夹 / 所有文件访问权限」才能用。旧版放在 voice/handwriting 的
@@ -32,16 +36,19 @@ object HandwritingModels {
     const val MODEL_FILE = "ochwpro.onnx"
     const val INDEX_FILE = "char_index.json"
 
-    private const val MODEL_SIZE = 7_001_270L
-    private const val MODEL_SHA256 = "eb04d62a314c7d7bac4e34d6ce0c24137474d30ff94b929115a621385420ce13"
+    private const val MODEL_SIZE = 2_231_032L
+    private const val MODEL_SHA256 = "3902aaae38df8c17d02d9fd5dad5f0045a4e6cda26d1812244fd135974bccf15"
     private const val INDEX_SIZE = 51_317L
     private const val INDEX_SHA256 = "171cf2ac23731428ac9dd28f64be82dece5f66a0ca3d674ffb3b567b51532176"
 
-    /** 主源国内可直连，备源是 CyIME 的 GitHub Release 原样转存。 */
+    /**
+     * INT8 只有 modelscope 官方有（CyIME Release 只转存了 FP32，故不作备源）。
+     * modelscope 国内可直连；带 SHA-256 校验，下载到的是 ochwpro-int8.onnx 内容，
+     * 保存成本地文件名 MODEL_FILE（ochwpro.onnx），推理接口完全一致。
+     */
     private val MODEL_URLS =
         listOf(
-            "https://www.modelscope.cn/models/bikeand/ochwpro/resolve/master/ochwpro.onnx",
-            "https://github.com/Cyletix/CyIME/releases/download/models/ochwpro-v1.0-ochwpro.onnx",
+            "https://www.modelscope.cn/models/bikeand/ochwpro/resolve/master/ochwpro-int8.onnx",
         )
     private val INDEX_URLS =
         listOf(
@@ -49,13 +56,35 @@ object HandwritingModels {
             "https://github.com/Cyletix/CyIME/releases/download/models/ochwpro-v1.0-char_index.json",
         )
 
-    /** 只读定位：应用私有外部目录，无需存储权限、native 可直接 fopen。 */
-    fun dir(context: Context): File =
+    /**
+     * 模型目录：开启「跟随使用者资料夹」且 app 层写入了可用路径时，用
+     * <使用者资料夹/rime>/handwriting（native 按真实路径 fopen）；否则回退应用私有目录。
+     * 每次都重新判定，切换存储位置/授权后无需重启即可生效。
+     */
+    fun dir(context: Context): File {
+        if (HandwritingSettings.useUserDataDir(context)) {
+            val root = HandwritingSettings.userDirPath(context)
+            if (root.isNotEmpty()) {
+                val candidate = File(File(root), DIR_NAME)
+                // 目录存在或父目录可写才采用；否则回退私有目录，避免 native fopen 失败。
+                if (candidate.isDirectory || (candidate.parentFile?.canWrite() == true)) return candidate
+            }
+        }
+        return privateDir(context)
+    }
+
+    /** 应用私有外部目录（无需存储权限），也是使用者资料夹不可用时的回退。 */
+    private fun privateDir(context: Context): File =
         File(context.getExternalFilesDir(null) ?: context.filesDir, DIR_NAME)
 
     fun modelFile(context: Context): File = File(dir(context), MODEL_FILE)
 
     fun indexFile(context: Context): File = File(dir(context), INDEX_FILE)
+
+    /** 显式目录版本：:hw_infer 子进程用绑定时传入的绝对路径，避免跨进程 prefs 缓存不一致。 */
+    fun modelFileIn(dir: File): File = File(dir, MODEL_FILE)
+
+    fun indexFileIn(dir: File): File = File(dir, INDEX_FILE)
 
     /** 文件齐全且大小对得上就认为可用；不做哈希是为了避免每次打开面板读 7 MB。 */
     fun isReady(context: Context): Boolean =
@@ -64,7 +93,7 @@ object HandwritingModels {
 
     /**
      * 旧版模型放在 voice/handwriting（依附语音模块）。这里用纯 Android API 枚举能可靠定位的
-     * 历史目录，找到就复制到新目录，用户不必重新下载 6.7 MB。
+     * 历史目录，找到就复制到新目录，用户不必重新下载模型。
      * 使用者资料夹路径由 app 的 UserDataManager 决定，本模块不反向依赖，未覆盖时可手动复制。
      */
     fun migrateLegacy(context: Context) {
@@ -72,12 +101,18 @@ object HandwritingModels {
         val target = dir(context)
         if (!target.isDirectory && !target.mkdirs()) return
         val candidates = mutableListOf<File>()
+        // 旧版依附语音的目录（历史迁移）。
         context.getExternalFilesDir(null)?.let { candidates += File(it, "voice/$DIR_NAME") }
         candidates += File(context.filesDir, "voice/$DIR_NAME")
         runCatching {
             candidates += File(Environment.getExternalStorageDirectory(), "rime/voice/$DIR_NAME")
         }
+        // 私有目录 ↔ 使用者资料夹之间互迁：切换「模型存放位置」后不用重新下载模型。
+        candidates += privateDir(context)
+        val userRoot = HandwritingSettings.userDirPath(context)
+        if (userRoot.isNotEmpty()) candidates += File(File(userRoot), DIR_NAME)
         for (root in candidates) {
+            if (root.absolutePath == target.absolutePath) continue
             val model = File(root, MODEL_FILE)
             val index = File(root, INDEX_FILE)
             if (!model.isFile || !index.isFile) continue
@@ -85,7 +120,7 @@ object HandwritingModels {
                 model.copyTo(File(target, MODEL_FILE), overwrite = true)
                 index.copyTo(File(target, INDEX_FILE), overwrite = true)
                 Timber.i("handwriting: migrated models from %s", root.absolutePath)
-            }.onFailure { Timber.w(it, "handwriting: legacy model migration failed") }
+            }.onFailure { Timber.w(it, "handwriting: model migration failed") }
             return
         }
     }
@@ -169,8 +204,10 @@ object HandwritingModels {
     /** 索引→字符 的对象容器键。 */
     private val INDEX_OBJECT_KEYS = listOf("idx2char", "id2char", "idx_to_char", "char_map")
 
-    fun charIndex(context: Context): Map<Int, String> {
-        val f = indexFile(context)
+    fun charIndex(context: Context): Map<Int, String> = charIndexFile(indexFile(context))
+
+    /** 显式字表文件版本（配合 [indexFileIn]）。 */
+    fun charIndexFile(f: File): Map<Int, String> {
         if (!f.isFile) return emptyMap()
         val raw = runCatching { f.readText(Charsets.UTF_8).trim() }.getOrNull()
         if (raw.isNullOrEmpty()) return emptyMap()

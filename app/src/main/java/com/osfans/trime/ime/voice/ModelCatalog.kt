@@ -15,6 +15,14 @@ data class ModelVariant(
     val zipName: String,
     val downloadMiB: Int,
     val files: List<ModelFileSpec>,
+    /**
+     * 自定义下载基址（以 / 结尾）。为空时走默认的 BiBi-Keyboard models release。
+     * 用于本仓自行打包的模型包（如 X-ASR punct / Zipformer-zh，官方只发 tar.bz2，
+     * 这里转成 installer 可识别的 ZIP 后托管在本仓 release）。
+     */
+    val baseUrl: String = "",
+    /** 自定义基址全部失败时，是否回退到 BiBi-Keyboard 官方 release 的同名 ZIP。 */
+    val fallbackToBibi: Boolean = false,
 ) {
     /** 设置页列表使用的复合值：家族 / 变体。 */
     val id: String get() = "$familyId/$key"
@@ -28,6 +36,13 @@ data class ModelVariant(
 object ModelCatalog {
     private const val RELEASE_BASE =
         "https://github.com/BryceWG/BiBi-Keyboard/releases/download/models/"
+
+    /**
+     * 本仓自打包模型的下载基址。官方只发 tar.bz2 的模型（X-ASR punct / Zipformer-zh）
+     * 转成 installer 可识别的 ZIP 后托管于此，避免改动解压层。
+     */
+    private const val LOCAL_RELEASE_BASE =
+        "https://github.com/mrjay4377/Trime-LocalVoice/releases/download/asr-models/"
 
     /**
      * 0 = 自动（镜像优先 → 官方兜底），1 = 官方，2..4 = 镜像。
@@ -76,6 +91,8 @@ object ModelCatalog {
             label = "标准版 int8（中文推荐）",
             zipName = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.zip",
             downloadMiB = 153,
+            baseUrl = LOCAL_RELEASE_BASE,
+            fallbackToBibi = true,
             files = listOf(
                 SENSE_VOICE_TOKENS,
                 spec("model.int8.onnx", 239_233_841L, "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51"),
@@ -87,6 +104,8 @@ object ModelCatalog {
             label = "高精度版 fp32",
             zipName = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.zip",
             downloadMiB = 828,
+            baseUrl = LOCAL_RELEASE_BASE,
+            fallbackToBibi = true,
             files = listOf(
                 SENSE_VOICE_TOKENS,
                 spec("model.onnx", 937_617_178L, "977016bd9c79f9eb343430b5cc305e07ab64d5212dff41b0dcfa1694bee9a8cb"),
@@ -98,6 +117,8 @@ object ModelCatalog {
             label = "0.6B int8（中文准确）",
             zipName = "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.zip",
             downloadMiB = 806,
+            baseUrl = LOCAL_RELEASE_BASE,
+            fallbackToBibi = true,
             files = listOf(
                 spec("conv_frontend.onnx", 44_148_281L, "d22dc4423e0940e49884e903d2ea2f7e5567c14fc1aed97e4e26d6b8f208ef9e"),
                 spec("encoder.int8.onnx", 182_491_662L, "60748d3e6744a57c9c91e1b17424a6c2990567e8adceb0783940c03ed98fa9d9"),
@@ -110,6 +131,8 @@ object ModelCatalog {
             label = "1.7B int8（大模型，需充足内存）",
             zipName = "sherpa-onnx-qwen3-asr-1.7B-int8-2026-08-04.zip",
             downloadMiB = 1970,
+            baseUrl = LOCAL_RELEASE_BASE,
+            fallbackToBibi = true,
             files = listOf(
                 spec("conv_frontend.onnx", 48_080_441L, "3cb27a9fe94d95c938e476f2012b21aba2ec0bfceef33b0e58acd208946bafdd"),
                 spec("encoder.int8.onnx", 314_222_162L, "a5deedae034ece715de8ed204378d8c77f889af3a60c2566581135e84cced7cd"),
@@ -122,6 +145,8 @@ object ModelCatalog {
             label = "Nano int8（中英）",
             zipName = "sherpa-onnx-funasr-nano-int8-2025-12-30.zip",
             downloadMiB = 691,
+            baseUrl = LOCAL_RELEASE_BASE,
+            fallbackToBibi = true,
             files = listOf(
                 spec("embedding.int8.onnx", 155_584_380L, "95e61cd0c9c3b9543339a4cf973c95c116815e745ccc1e0285cbd81f76d18644"),
                 spec("encoder_adaptor.int8.onnx", 237_792_748L, "f36dea2e30fbc33b5db1d7a7265cc976c5e5586c77b042d5adb1ad27c72db422"),
@@ -135,6 +160,8 @@ object ModelCatalog {
             label = "MLT Nano int8（多语种）",
             zipName = "sherpa-onnx-funasr-mlt-nano-int8-2026-03-21.zip",
             downloadMiB = 722,
+            baseUrl = LOCAL_RELEASE_BASE,
+            fallbackToBibi = true,
             files = listOf(
                 spec("embedding.int8.onnx", 155_583_106L, "2eb6f47e9119b0e92cb38caea8d41505d446c7ee829a44f91619498a6ec7594b"),
                 spec("encoder_adaptor.int8.onnx", 237_792_749L, "0ccd6c75ffe07d724921fd0787389479c3ae8d84e60f55508f43d87c0f02bc85"),
@@ -148,6 +175,8 @@ object ModelCatalog {
             label = "0.6B V2 int8（英语）",
             zipName = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.zip",
             downloadMiB = 451,
+            baseUrl = LOCAL_RELEASE_BASE,
+            fallbackToBibi = true,
             files = listOf(
                 spec("tokens.txt", 9_384L, "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d"),
                 spec("encoder.int8.onnx", 652_184_296L, "a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab"),
@@ -161,6 +190,8 @@ object ModelCatalog {
             label = "0.6B V3 int8（欧洲语言）",
             zipName = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.zip",
             downloadMiB = 456,
+            baseUrl = LOCAL_RELEASE_BASE,
+            fallbackToBibi = true,
             files = listOf(
                 spec("tokens.txt", 93_939L, "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"),
                 spec("encoder.int8.onnx", 652_184_281L, "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247"),
@@ -174,6 +205,8 @@ object ModelCatalog {
             label = "FireRedASR V2 CTC int8（中英）",
             zipName = "sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25.zip",
             downloadMiB = 496,
+            baseUrl = LOCAL_RELEASE_BASE,
+            fallbackToBibi = true,
             files = listOf(
                 spec("tokens.txt", 79_172L, "1bc613de2112d257e61a349c3e72d1b1a9cf19c33d3ca954197ad2171e5ea07b"),
                 spec("model.int8.onnx", 775_861_420L, "ca3dbabd82170110cc0b343c2890866d449984bc9cd92b9a18371ff80a81bb99"),
@@ -188,6 +221,8 @@ object ModelCatalog {
             label = "TeleSpeech CTC int8（中文，体积最小）",
             zipName = "sherpa-onnx-telespeech-ctc-int8-zh-2024-06-04.zip",
             downloadMiB = 180,
+            baseUrl = LOCAL_RELEASE_BASE,
+            fallbackToBibi = true,
             files = listOf(
                 spec("tokens.txt", 66_642L, ""),
                 spec("model.int8.onnx", 340_990_949L, ""),
@@ -202,6 +237,8 @@ object ModelCatalog {
             label = "X-ASR 480ms（中英，边说边出字）",
             zipName = "sherpa-onnx-streaming-x-asr-480ms-zh-en.zip",
             downloadMiB = 529,
+            baseUrl = LOCAL_RELEASE_BASE,
+            fallbackToBibi = true,
             files = listOf(
                 spec("tokens.txt", 58_806L, ""),
                 spec("encoder-480ms.onnx", 592_968_361L, ""),
@@ -218,6 +255,8 @@ object ModelCatalog {
             label = "Paraformer 中英 int8（边说边出字）",
             zipName = "sherpa-onnx-streaming-paraformer-bilingual-zh-en.zip",
             downloadMiB = 973,
+            baseUrl = LOCAL_RELEASE_BASE,
+            fallbackToBibi = true,
             files = listOf(
                 spec("tokens.txt", 75_756L, ""),
                 spec("encoder.int8.onnx", 165_462_184L, ""),
@@ -230,16 +269,56 @@ object ModelCatalog {
             label = "Paraformer 中粤英 int8（边说边出字）",
             zipName = "sherpa-onnx-streaming-paraformer-trilingual-zh-cantonese-en.zip",
             downloadMiB = 974,
+            baseUrl = LOCAL_RELEASE_BASE,
+            fallbackToBibi = true,
             files = listOf(
                 spec("tokens.txt", 81_289L, ""),
                 spec("encoder.int8.onnx", 166_362_800L, ""),
                 spec("decoder.int8.onnx", 72_062_549L, ""),
             ),
         ),
+        // ===== 本仓自打包的流式模型（官方只发 tar.bz2，这里转成 ZIP 托管在本仓 release）=====
+        // X-ASR 480ms 中英带标点 int8：与下方 zipformer-zh 同为 Transducer 三件套，
+        // 但词表含标点 token，输出自带中英文标点；体积比旧的 480ms fp32 版小一半。
+        // 逐文件 SHA-256 取自官方 HF 仓库（lorneluo/...-2026-06-05）。
+        ModelVariant(
+            familyId = VoiceModels.STREAMING_FAMILY,
+            key = "xasr-punct-int8",
+            label = "X-ASR 中英带标点 int8（边说边出字，自动标点）",
+            zipName = "sherpa-onnx-x-asr-480ms-punct-int8.zip",
+            downloadMiB = 148,
+            baseUrl = LOCAL_RELEASE_BASE,
+            files = listOf(
+                spec("tokens.txt", 58_806L, ""),
+                spec("encoder.int8.onnx", 155_278_641L, "908596dcc137a73b95be908ca55e88caa1b3dbbe8027c171615f4b0609c5eb1e"),
+                spec("decoder.onnx", 11_309_084L, "a1cbc9eac2d5e3fb6617a218c67ad6daaa7f4e0fd225f08b2c22ab0413c8c257"),
+                spec("joiner.int8.onnx", 2_581_422L, "aedb7fa697b2ab43f20499826fff7c997eea7d67db77be97769aeeeb726e63b3"),
+            ),
+        ),
+        // 中文 Zipformer int8（2025-06-30）：XIME 当前默认模型，字级词表、纯中文、
+        // 无标点输出，体积小、加载快。逐文件 SHA-256 取自官方 HF 仓库（csukuangfj）。
+        ModelVariant(
+            familyId = VoiceModels.STREAMING_FAMILY,
+            key = "zipformer-zh-int8",
+            label = "中文 Zipformer int8（体积小，边说边出字）",
+            zipName = "sherpa-onnx-streaming-zipformer-zh-int8.zip",
+            downloadMiB = 154,
+            baseUrl = LOCAL_RELEASE_BASE,
+            files = listOf(
+                spec("tokens.txt", 20_628L, ""),
+                spec("encoder.int8.onnx", 161_141_793L, "5ac51e27981bb4dab01bb9be4958453ba50c3b61c063ddda0eab23fd3671aa4f"),
+                spec("decoder.onnx", 5_165_083L, "06522ad63cec0fdf6809f4e1db9bb4f7d710c34582e3b35db62ac60eccafac7e"),
+                spec("joiner.int8.onnx", 1_033_416L, "b34584dc6f561089e1d747fedebb3765f2caa72c927ef54d7ca55e5ae40a814b"),
+            ),
+        ),
     )
 
+    /** 该变体的下载基址：自定义优先，否则默认 BiBi release。 */
+    private fun baseOf(variant: ModelVariant): String =
+        variant.baseUrl.ifEmpty { RELEASE_BASE }
+
     /** 官方原始地址，供「手动下载」展示与复制。 */
-    fun officialUrl(variant: ModelVariant): String = RELEASE_BASE + variant.zipName
+    fun officialUrl(variant: ModelVariant): String = baseOf(variant) + variant.zipName
 
     /**
      * 「手动下载」逐源复制用：返回 (源名称, 该源的完整下载地址)。
@@ -280,12 +359,15 @@ object ModelCatalog {
 
     /** 按下载源返回候选 URL；自动模式镜像优先、官方兜底，避免国内先卡在官方 302 上。 */
     fun candidateUrls(variant: ModelVariant, sourceIndex: Int): List<String> {
-        val official = RELEASE_BASE + variant.zipName
+        val official = baseOf(variant) + variant.zipName
+        // 走本仓的变体：所有本仓地址（镜像+官方）都失败后，再追加 BiBi 官方同名 ZIP 兜底。
+        val bibiFallback = if (variant.fallbackToBibi) listOf(RELEASE_BASE + variant.zipName) else emptyList()
         if (sourceIndex == 0) {
             val mirrors = (PREFIXES.drop(2) + EXTRA_MIRRORS).map { it + official }
-            return mirrors + official
+            return mirrors + official + bibiFallback
         }
         val prefix = PREFIXES.getOrElse(sourceIndex) { "" }
-        return listOf(if (prefix.isEmpty()) official else prefix + official)
+        val primary = if (prefix.isEmpty()) official else prefix + official
+        return listOf(primary) + bibiFallback
     }
 }
