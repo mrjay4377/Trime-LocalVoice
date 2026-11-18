@@ -71,15 +71,8 @@ class SwitchOptionWindow(di: DI) :
             } else {
                 context.getString(R.string.floating_keyboard)
             }
-        // 与「悬浮键盘 · 已开启」一致：状态反映「当前是否在手写面板」，
-        // 而不是设置页的功能总开关。这样在键盘里显示「已关闭」，进手写后显示「已开启」，
-        // 每次打开菜单都会按来源窗口重新计算，不会出现永远只显示「已开启」。
-        val handwritingOn = HandwritingSettings.isEnabled(context) && handwritingActive
-        val handwritingLabel =
-            context.getString(R.string.handwriting_settings) +
-                " · " + context.getString(
-                    if (handwritingOn) R.string.keyboard_layout_on else R.string.keyboard_layout_off,
-                )
+        // 手写格子只显示固定名称「手写输入」，不再附加「· 已开启 / 已关闭」状态后缀。
+        val handwritingLabel = context.getString(R.string.handwriting_settings)
         // 与咩版一致：最前两项固定为「键盘样式」「方案」，模式切换放在其后。
         val entries = mutableListOf<SwitchOptionEntry>(
             SwitchOptionEntry.Static(

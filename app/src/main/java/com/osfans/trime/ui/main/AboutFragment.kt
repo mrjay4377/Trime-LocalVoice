@@ -66,6 +66,7 @@ class AboutFragment : PaddingPreferenceFragment() {
                     )
                 },
             )
+            addPreference("制作方式", "本分支全程由 AI 对话协作开发、调试与打包")
             addCategory("") {
                 isIconSpaceReserved = false
                 addPreference(R.string.privacy_policy) {

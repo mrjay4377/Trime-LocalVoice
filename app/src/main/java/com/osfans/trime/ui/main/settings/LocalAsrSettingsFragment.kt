@@ -452,19 +452,6 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                 },
             )
 
-            addPreference(
-                Preference(ctx).apply {
-                    key = KEY_HOTWORDS_BOOK_PATH
-                    title = "复制词库文件路径"
-                    summary = displayPath(ctx, VoiceHotwordBook.filePath(ctx))
-                    isIconSpaceReserved = false
-                    setOnPreferenceClickListener {
-                        copyPath(ctx, VoiceHotwordBook.filePath(ctx))
-                        true
-                    }
-                },
-            )
-
             addPreference(category(ctx, KEY_CATEGORY_CORRECTIONS, "识别结果纠错（全部模型）"))
 
             addPreference(
@@ -506,19 +493,6 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
                         VoiceCorrections.reload(ctx, force = true)
                         correctionsPreference?.summary = correctionsSummary(ctx)
                         toast(ctx, "已载入 ${VoiceCorrections.ruleCount()} 条规则")
-                        true
-                    }
-                },
-            )
-
-            addPreference(
-                Preference(ctx).apply {
-                    key = KEY_CORRECTIONS_PATH
-                    title = "复制纠错词库路径"
-                    summary = displayPath(ctx, VoiceCorrections.file(ctx).absolutePath)
-                    isIconSpaceReserved = false
-                    setOnPreferenceClickListener {
-                        copyPath(ctx, VoiceCorrections.file(ctx).absolutePath)
                         true
                     }
                 },
@@ -1864,12 +1838,10 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
         const val KEY_HOTWORDS_CONTEXT = "lv_hotwords_context"
         const val KEY_HOTWORDS_BOOK_RELOAD = "lv_hotwords_book_reload"
         const val KEY_HOTWORDS_BOOK_IMPORT = "lv_hotwords_book_import"
-        const val KEY_HOTWORDS_BOOK_PATH = "lv_hotwords_book_path"
         const val KEY_CATEGORY_CORRECTIONS = "lv_category_corrections"
         const val KEY_CORRECTIONS_ENABLED = "lv_corrections_enabled"
         const val KEY_CORRECTIONS_EDIT = "lv_corrections_edit"
         const val KEY_CORRECTIONS_RELOAD = "lv_corrections_reload"
-        const val KEY_CORRECTIONS_PATH = "lv_corrections_path"
         /** 模型存放位置：用户目录（使用者资料夹，native 可直接读取）。 */
         const val KEY_USER_DIR = "lv_user_dir"
         const val BIBI_REPO_URL = "https://github.com/BryceWG/BiBi-Keyboard"

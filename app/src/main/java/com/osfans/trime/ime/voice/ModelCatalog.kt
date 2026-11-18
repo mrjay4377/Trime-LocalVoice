@@ -91,8 +91,6 @@ object ModelCatalog {
             label = "标准版 int8（中文推荐）",
             zipName = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.zip",
             downloadMiB = 153,
-            baseUrl = LOCAL_RELEASE_BASE,
-            fallbackToBibi = true,
             files = listOf(
                 SENSE_VOICE_TOKENS,
                 spec("model.int8.onnx", 239_233_841L, "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51"),
@@ -104,8 +102,6 @@ object ModelCatalog {
             label = "高精度版 fp32",
             zipName = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.zip",
             downloadMiB = 828,
-            baseUrl = LOCAL_RELEASE_BASE,
-            fallbackToBibi = true,
             files = listOf(
                 SENSE_VOICE_TOKENS,
                 spec("model.onnx", 937_617_178L, "977016bd9c79f9eb343430b5cc305e07ab64d5212dff41b0dcfa1694bee9a8cb"),
@@ -117,8 +113,6 @@ object ModelCatalog {
             label = "0.6B int8（中文准确）",
             zipName = "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.zip",
             downloadMiB = 806,
-            baseUrl = LOCAL_RELEASE_BASE,
-            fallbackToBibi = true,
             files = listOf(
                 spec("conv_frontend.onnx", 44_148_281L, "d22dc4423e0940e49884e903d2ea2f7e5567c14fc1aed97e4e26d6b8f208ef9e"),
                 spec("encoder.int8.onnx", 182_491_662L, "60748d3e6744a57c9c91e1b17424a6c2990567e8adceb0783940c03ed98fa9d9"),
@@ -131,8 +125,6 @@ object ModelCatalog {
             label = "1.7B int8（大模型，需充足内存）",
             zipName = "sherpa-onnx-qwen3-asr-1.7B-int8-2026-08-04.zip",
             downloadMiB = 1970,
-            baseUrl = LOCAL_RELEASE_BASE,
-            fallbackToBibi = true,
             files = listOf(
                 spec("conv_frontend.onnx", 48_080_441L, "3cb27a9fe94d95c938e476f2012b21aba2ec0bfceef33b0e58acd208946bafdd"),
                 spec("encoder.int8.onnx", 314_222_162L, "a5deedae034ece715de8ed204378d8c77f889af3a60c2566581135e84cced7cd"),
@@ -145,8 +137,6 @@ object ModelCatalog {
             label = "Nano int8（中英）",
             zipName = "sherpa-onnx-funasr-nano-int8-2025-12-30.zip",
             downloadMiB = 691,
-            baseUrl = LOCAL_RELEASE_BASE,
-            fallbackToBibi = true,
             files = listOf(
                 spec("embedding.int8.onnx", 155_584_380L, "95e61cd0c9c3b9543339a4cf973c95c116815e745ccc1e0285cbd81f76d18644"),
                 spec("encoder_adaptor.int8.onnx", 237_792_748L, "f36dea2e30fbc33b5db1d7a7265cc976c5e5586c77b042d5adb1ad27c72db422"),
@@ -160,8 +150,6 @@ object ModelCatalog {
             label = "MLT Nano int8（多语种）",
             zipName = "sherpa-onnx-funasr-mlt-nano-int8-2026-03-21.zip",
             downloadMiB = 722,
-            baseUrl = LOCAL_RELEASE_BASE,
-            fallbackToBibi = true,
             files = listOf(
                 spec("embedding.int8.onnx", 155_583_106L, "2eb6f47e9119b0e92cb38caea8d41505d446c7ee829a44f91619498a6ec7594b"),
                 spec("encoder_adaptor.int8.onnx", 237_792_749L, "0ccd6c75ffe07d724921fd0787389479c3ae8d84e60f55508f43d87c0f02bc85"),
@@ -175,8 +163,6 @@ object ModelCatalog {
             label = "0.6B V2 int8（英语）",
             zipName = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.zip",
             downloadMiB = 451,
-            baseUrl = LOCAL_RELEASE_BASE,
-            fallbackToBibi = true,
             files = listOf(
                 spec("tokens.txt", 9_384L, "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d"),
                 spec("encoder.int8.onnx", 652_184_296L, "a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab"),
@@ -190,8 +176,6 @@ object ModelCatalog {
             label = "0.6B V3 int8（欧洲语言）",
             zipName = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.zip",
             downloadMiB = 456,
-            baseUrl = LOCAL_RELEASE_BASE,
-            fallbackToBibi = true,
             files = listOf(
                 spec("tokens.txt", 93_939L, "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"),
                 spec("encoder.int8.onnx", 652_184_281L, "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247"),
@@ -205,8 +189,6 @@ object ModelCatalog {
             label = "FireRedASR V2 CTC int8（中英）",
             zipName = "sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25.zip",
             downloadMiB = 496,
-            baseUrl = LOCAL_RELEASE_BASE,
-            fallbackToBibi = true,
             files = listOf(
                 spec("tokens.txt", 79_172L, "1bc613de2112d257e61a349c3e72d1b1a9cf19c33d3ca954197ad2171e5ea07b"),
                 spec("model.int8.onnx", 775_861_420L, "ca3dbabd82170110cc0b343c2890866d449984bc9cd92b9a18371ff80a81bb99"),
@@ -221,8 +203,6 @@ object ModelCatalog {
             label = "TeleSpeech CTC int8（中文，体积最小）",
             zipName = "sherpa-onnx-telespeech-ctc-int8-zh-2024-06-04.zip",
             downloadMiB = 180,
-            baseUrl = LOCAL_RELEASE_BASE,
-            fallbackToBibi = true,
             files = listOf(
                 spec("tokens.txt", 66_642L, ""),
                 spec("model.int8.onnx", 340_990_949L, ""),
@@ -237,8 +217,6 @@ object ModelCatalog {
             label = "X-ASR 480ms（中英，边说边出字）",
             zipName = "sherpa-onnx-streaming-x-asr-480ms-zh-en.zip",
             downloadMiB = 529,
-            baseUrl = LOCAL_RELEASE_BASE,
-            fallbackToBibi = true,
             files = listOf(
                 spec("tokens.txt", 58_806L, ""),
                 spec("encoder-480ms.onnx", 592_968_361L, ""),
@@ -255,8 +233,6 @@ object ModelCatalog {
             label = "Paraformer 中英 int8（边说边出字）",
             zipName = "sherpa-onnx-streaming-paraformer-bilingual-zh-en.zip",
             downloadMiB = 973,
-            baseUrl = LOCAL_RELEASE_BASE,
-            fallbackToBibi = true,
             files = listOf(
                 spec("tokens.txt", 75_756L, ""),
                 spec("encoder.int8.onnx", 165_462_184L, ""),
@@ -269,8 +245,6 @@ object ModelCatalog {
             label = "Paraformer 中粤英 int8（边说边出字）",
             zipName = "sherpa-onnx-streaming-paraformer-trilingual-zh-cantonese-en.zip",
             downloadMiB = 974,
-            baseUrl = LOCAL_RELEASE_BASE,
-            fallbackToBibi = true,
             files = listOf(
                 spec("tokens.txt", 81_289L, ""),
                 spec("encoder.int8.onnx", 166_362_800L, ""),

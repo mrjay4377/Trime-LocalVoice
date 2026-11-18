@@ -9,8 +9,6 @@
  */
 package com.osfans.trime.ui.main.settings
 
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.os.Bundle
 import android.widget.Toast
@@ -33,7 +31,6 @@ import kotlinx.coroutines.withTimeout
 class HandwritingSettingsFragment : PaddingPreferenceFragment() {
     private val mainViewModel: MainViewModel by activityViewModels()
     private var modelPreference: Preference? = null
-    private var pathPreference: Preference? = null
     private var codePreference: Preference? = null
     private var downloading = false
 
@@ -109,26 +106,19 @@ class HandwritingSettingsFragment : PaddingPreferenceFragment() {
 
         screen.addPreference(
             Preference(ctx).apply {
-                key = "hw_path"
-                title = "复制模型目录"
-                isIconSpaceReserved = false
-                pathPreference = this
-                setOnPreferenceClickListener {
-                    val path = HandwritingModels.dir(ctx).absolutePath
-                    (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                        .setPrimaryClip(ClipData.newPlainText("手写模型目录", path))
-                    toast("已复制：$path")
-                    true
-                }
-            },
-        )
-
-        screen.addPreference(
-            Preference(ctx).apply {
                 key = "hw_help"
                 title = "如何使用"
-                summary = "模型就绪后，键盘「更多」→「手写输入」打开面板；逐字书写或在同一区域连续叠写，点候选上屏。全程离线，模型为 MIT 协议的 ochwpro。"
+                summary = "模型就绪后，键盘「更多」→「手写输入」打开面板；逐字书写或叠写，点候选上屏。点击看完整说明与致谢开源"
                 isIconSpaceReserved = false
+                setOnPreferenceClickListener {
+                    AlertDialog
+                        .Builder(ctx)
+                        .setTitle("手写输入 · 使用说明")
+                        .setMessage(HW_USAGE)
+                        .setPositiveButton(android.R.string.ok, null)
+                        .show()
+                    true
+                }
             },
         )
 
@@ -230,7 +220,6 @@ class HandwritingSettingsFragment : PaddingPreferenceFragment() {
                 appliedPath.isEmpty() -> "需在「设置 → 数据位置」选择使用者资料夹并授予「所有文件访问权限」，才会放到用户目录"
                 else -> "当前：使用者资料夹（$appliedPath）"
             }
-        pathPreference?.summary = HandwritingModels.dir(ctx).absolutePath
         val id = HandwritingSettings.codeSource(ctx)
         codePreference?.summary =
             if (id.isEmpty()) {
@@ -242,5 +231,21 @@ class HandwritingSettingsFragment : PaddingPreferenceFragment() {
 
     private fun toast(text: String) {
         context?.let { Toast.makeText(it, text, Toast.LENGTH_SHORT).show() }
+    }
+
+    companion object {
+        /** 「如何使用」弹窗全文：用法 + 致谢与开源（与语音设置页风格一致）。 */
+        private const val HW_USAGE =
+            "模型就绪后，点键盘「更多」→「手写输入」打开面板；逐字书写，或在同一区域连续叠写多字，再点候选上屏。候选旁会按你选的 Rime 方案字典显示提示码，并据此给出词组联想。全程离线识别，不联网。\n\n" +
+                "── 致谢与开源 ──\n" +
+                "手写识别引擎采用 ochwpro（StrokeTransformer 模型，MIT 协议），叠写切分算法参考上游 stroke_segmenter.py；模型与字表由 XIME / CyIME 共用：\n" +
+                "https://github.com/ximeiorg/ochwpro\n" +
+                "https://github.com/Cyletix/CyIME\n\n" +
+                "推理运行时使用 ONNX Runtime（Microsoft，MIT 协议）；模型为官方 INT8 动态量化版，经 ModelScope 分发：\n" +
+                "https://github.com/microsoft/onnxruntime\n" +
+                "https://www.modelscope.cn/models/bikeand/ochwpro\n\n" +
+                "输入法内核基于同文输入法 osfans/trime（GPL-3.0）。本分支同样开源：\n" +
+                "https://github.com/osfans/trime\n" +
+                "https://github.com/mrjay4377/Trime-LocalVoice"
     }
 }

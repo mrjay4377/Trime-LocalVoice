@@ -44,6 +44,13 @@ class HandwritingInkView(context: Context) : View(context) {
             color = Color.argb(40, 128, 128, 128)
         }
 
+    /** 按书写区底色自适应笔迹与辅助线颜色，避免深色主题下深灰笔迹看不清。 */
+    fun setInkColors(ink: Int, guide: Int) {
+        inkPaint.color = ink
+        guidePaint.color = guide
+        invalidate()
+    }
+
     /** 主线程调用：拿到当前笔迹的不可变快照。 */
     fun snapshot(): List<InkStroke> = strokes.toList()
 

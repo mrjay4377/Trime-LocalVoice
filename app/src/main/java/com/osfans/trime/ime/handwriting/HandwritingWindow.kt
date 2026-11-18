@@ -28,6 +28,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.widget.Button
 import android.widget.FrameLayout
@@ -36,6 +37,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.osfans.trime.core.CandidateProto
 import com.osfans.trime.core.Candidates
+import com.osfans.trime.data.prefs.AppPrefs
 import com.osfans.trime.data.theme.ThemeScope
 import com.osfans.trime.handwriting.HandwritingInkView
 import com.osfans.trime.handwriting.HandwritingModels
@@ -69,6 +71,10 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
     private val broadcaster: InputBroadcaster by instance()
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** 删除键长按连删：复用主键盘设置里的长按超时与重复间隔，保持手感一致。 */
+    private val longPressTimeout by AppPrefs.defaultInstance().keyboard.longPressTimeout
+    private val keyRepeatInterval by AppPrefs.defaultInstance().keyboard.repeatInterval
 
     /** 任何协程异常都显示在状态栏，绝不让它冒泡杀掉 IME 进程造成白屏。 */
     private val exceptionHandler =
@@ -175,13 +181,15 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
             setPadding(16, 16, 16, 16)
         }
 
-    /** 统一的方块按键：白底（普通键）或灰底（功能键），不用系统默认 Button 样式。 */
+    /** 统一的方块按键：白底（普通键）或灰底（功能键），不用系统默认 Button 样式。
+     *  repeatable = true 时支持长按连删（短按一次、按住超过超时后按固定间隔连续触发）。 */
     private fun keyButton(
         label: String,
         action: () -> Unit,
         bg: Int,
         fg: Int,
         size: Float = 14f,
+        repeatable: Boolean = false,
     ): Button =
         Button(context).apply {
             text = label
@@ -198,8 +206,63 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
                     cornerRadius = 6f * context.resources.displayMetrics.density
                     setColor(bg)
                 }
-            setOnClickListener { action() }
+            if (repeatable) {
+                attachRepeatOnLongPress(action)
+            } else {
+                setOnClickListener { action() }
+            }
         }
+
+    /**
+     * 给按键挂上「短按一次 / 长按连发」的触摸逻辑：
+     * - 按下后超过 longPressTimeout 仍未抬起 → 立刻触发一次，此后每 keyRepeatInterval 触发一次；
+     * - 抬起或取消时停止所有连发；若整个按下过程没到长按阈值 → 按短按补触发一次。
+     * 连发与短按互斥，用 longPressFired 去重，避免抬手瞬间多删一个。
+     */
+    private fun Button.attachRepeatOnLongPress(action: () -> Unit) {
+        var longPressFired = false
+        val repeatTick =
+            object : Runnable {
+                override fun run() {
+                    action()
+                    mainHandler.postDelayed(this, keyRepeatInterval.toLong())
+                }
+            }
+        val longPressStart =
+            object : Runnable {
+                override fun run() {
+                    longPressFired = true
+                    isPressed = false
+                    repeatTick.run() // 立即删一次，随后进入连发
+                }
+            }
+
+        setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    longPressFired = false
+                    isPressed = true
+                    mainHandler.postDelayed(longPressStart, longPressTimeout.toLong())
+                    true // 自己消费 DOWN，短按在 UP 里补触发
+                }
+                MotionEvent.ACTION_UP -> {
+                    mainHandler.removeCallbacks(longPressStart)
+                    mainHandler.removeCallbacks(repeatTick)
+                    isPressed = false
+                    if (!longPressFired) action() // 短按：删一个
+                    performClick() // 保留无障碍点击反馈
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    mainHandler.removeCallbacks(longPressStart)
+                    mainHandler.removeCallbacks(repeatTick)
+                    isPressed = false
+                    true
+                }
+                else -> false
+            }
+        }
+    }
 
     /** 底部按键：局部函数拿不到 apply{} 的隐式接收者，所以用成员方法显式传容器。 */
     private fun addBottomKey(
@@ -229,19 +292,38 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
                 Configuration.UI_MODE_NIGHT_YES
 
         val solidBg =
-            runCatching { themeScope.colors.rootBackground }
-                .getOrNull()
+            themeColor { themeScope.colors.rootBackground }
                 ?.let { 0xFF000000.toInt() or (it and 0x00FFFFFF) }
                 ?: if (night) 0xFF202124.toInt() else 0xFFEFEFF2.toInt()
         val safeText =
-            runCatching { themeScope.colors.candidateTextColor }
-                .getOrNull()
+            themeColor { themeScope.colors.candidateTextColor }
                 ?.let { readable(it, solidBg) }
                 ?: contrastText(solidBg)
-        btnBgColor = if (luminance(solidBg) > 0.5) 0xFFD5D9E2.toInt() else 0xFF3B404B.toInt()
-        btnTextColor = contrastText(btnBgColor)
-        keyBgColor = if (luminance(solidBg) > 0.5) 0xFFFDFDFD.toInt() else 0xFF2C3038.toInt()
-        keyTextColor = contrastText(keyBgColor)
+
+        // 按键配色跟随主题：普通键取 keyBack/keyText，功能键（撤销/清空/删除/换行/符号）取
+        // hilitedKeyBack/hilitedKeyText；取不到（主题该键为图片或未定义）才回退到按明度算的兜底色。
+        // 文字色用 readable 校验对比度，避免个别主题的文字色与按键底色太接近看不清。
+        val rawKeyBg = themeColor { themeScope.colors.keyBackColor }
+        val rawKeyText = themeColor { themeScope.colors.keyTextColor }
+        val rawBtnBg = themeColor { themeScope.colors.hilitedKeyBackColor }
+        val rawBtnText = themeColor { themeScope.colors.hilitedKeyTextColor }
+        keyBgColor =
+            rawKeyBg?.let { 0xFF000000.toInt() or (it and 0x00FFFFFF) }
+                ?: if (luminance(solidBg) > 0.5) 0xFFFDFDFD.toInt() else 0xFF2C3038.toInt()
+        keyTextColor =
+            rawKeyText?.let { readable(it, keyBgColor) } ?: contrastText(keyBgColor)
+        btnBgColor =
+            rawBtnBg?.let { 0xFF000000.toInt() or (it and 0x00FFFFFF) }
+                ?: if (luminance(solidBg) > 0.5) 0xFFD5D9E2.toInt() else 0xFF3B404B.toInt()
+        btnTextColor =
+            rawBtnText?.let { readable(it, btnBgColor) } ?: contrastText(btnBgColor)
+
+        // 书写区也跟随主题：底色取候选栏背景，边框取主题边框色；取不到回退到原来的中性色。
+        val inkBg =
+            themeColor { themeScope.colors.candidateBackground }
+                ?.let { 0xFF000000.toInt() or (it and 0x00FFFFFF) }
+                ?: 0xFFFAFAFA.toInt()
+        val inkBorder = themeColor { themeScope.colors.borderColor } ?: 0xFF9AA0A6.toInt()
 
         // 顶部细条：正常状态留空，只在出错 / 模型缺失时显示文字。
         statusView =
@@ -258,14 +340,19 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
             HandwritingInkView(context).apply {
                 background =
                     GradientDrawable().apply {
-                        setColor(0xFFFAFAFA.toInt())
+                        setColor(inkBg)
                         cornerRadius = 6 * d
-                        setStroke((1 * d).toInt(), 0xFF9AA0A6.toInt())
+                        setStroke((1 * d).toInt(), inkBorder)
                     }
                 onStrokeFinished = { scheduleRecognize() }
                 // 字符面板是临时状态：用户直接在书写区落笔就自动收起，不用去找「返回」。
                 onWriteStart = { if (charPanelOpen) showBottomMain() }
             }
+        // 笔迹色跟随书写区底色明度自适应：深底用浅笔、浅底用深笔。
+        inkView.setInkColors(
+            if (luminance(inkBg) > 0.5) 0xEB212121.toInt() else 0xEBF7F7F9.toInt(),
+            if (luminance(inkBg) > 0.5) 0x28808080.toInt() else 0x28C0C4CC.toInt(),
+        )
 
         // 右侧竖列：撤销 / 清空 / 删除，三个等分高度。整列占 1 份权重，与「换行」键同宽。
         val rightColumn =
@@ -285,6 +372,7 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
                             if (isDelete) btnBgColor else keyBgColor,
                             if (isDelete) btnTextColor else keyTextColor,
                             13f,
+                            repeatable = isDelete,
                         ),
                         LinearLayout
                             .LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
@@ -443,17 +531,23 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
     }
 
     private fun commitChar(text: String) {
+        // 符号/数字直接上屏会改变光标前内容：旧的补完前缀已失效，必须重置，
+        // 否则随后点联想词会误删刚上屏的字符。
+        lastCommitted = ""
         runCatching { service.commitText(text) }
             .onFailure { t -> Timber.w(t, "handwriting: commit char failed") }
     }
 
     private fun deleteChar() {
+        // 删除键移除了光标前的字：补完前缀不再紧贴光标，重置以免点联想词时误删正文。
+        lastCommitted = ""
         runCatching { service.currentInputConnection?.deleteSurroundingText(1, 0) }
             .onFailure { t -> Timber.w(t, "handwriting: delete char failed") }
     }
 
     private fun clearInk() {
         runCatching { inkView.clear() }
+        lastCommitted = ""
         HandwritingCandidateBridge.publish(emptyArray())
         refreshMainBar()
         safeStatus("")
@@ -491,8 +585,10 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
                     safeStatus(HandwritingCodeLookup.diagnose(context, codeSourceId))
                 }
             }
+            // 绑定推理进程放到 prepareModel() 里，在存储路径 sync 完成之后执行：
+            // bindInference() 会把 HandwritingModels.dir() 的当前值通过 Intent 传给 :hw_infer，
+            // 若早于 sync()，子进程会拿到旧路径（如用户目录尚未写入）导致加载不到模型。
             prepareModel()
-            bindInference()
         }.onFailure { t ->
             Timber.e(t, "handwriting: onAttached failed")
             safeStatus("手写初始化失败：" + errorHint(t))
@@ -502,13 +598,15 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
     override fun onDetached() {
         Timber.i("handwriting: onDetached")
         recognizeJob?.cancel()
-        // 离开手写面板：补完基准失效，重置 lastCommitted，避免残留前缀在后续键盘输入时误触发替换。
-        lastCommitted = ""
         // 展开候选窗打开前会 suspendClear()；此时 clear() 是空操作，桥接仍 active。
         // 这种「临时让位」不能 cancel 协程作用域 / 解绑推理进程，否则收起回来手写直接失效。
         HandwritingCandidateBridge.clear()
         val suspended = HandwritingCandidateBridge.active
         if (!suspended) {
+            // 真正离开手写面板：补完基准失效，重置 lastCommitted，避免残留前缀在后续键盘输入时误触发替换。
+            // 展开候选窗让位（suspended）时候选栏与补完词仍保留，lastCommitted 必须一起保留，
+            // 否则收起回来点联想词会因 prefix 丢失而直接追加，产生「叶叶子」叠词。
+            lastCommitted = ""
             scope.cancel()
             unbindInference()
         }
@@ -558,6 +656,9 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
                 }.getOrDefault(false to "")
             withContext(Dispatchers.Main) {
                 modelReady = state.first
+                // sync() 已在上面把用户目录路径写入 prefs，现在绑定推理进程，
+                // bindInference() 读到的 dir() 与子进程实际加载路径一致，避免首次进入加载失败。
+                bindInference()
                 // 正常状态不再往面板写提示文字；只在模型缺失时给出可操作的信息。
                 if (!modelReady) {
                     safeStatus("未安装手写模型：设置 → 手写输入，点「手写模型」下载\n目录：${state.second}")
@@ -738,6 +839,9 @@ class HandwritingWindow(di: DI) : BoardWindow.NoBarBoardWindow(di) {
         val message = t.message?.take(140).orEmpty().ifEmpty { "无详细信息" }
         return t.javaClass.simpleName + ": " + message
     }
+
+    /** 安全读取主题色：主题里该键解析为图片或未定义时读取会抛异常，返回 null 让调用方兜底。 */
+    private fun themeColor(block: () -> Int): Int? = runCatching { block() }.getOrNull()
 
     private fun luminance(color: Int): Double {
         val r = (color shr 16 and 0xFF) / 255.0
