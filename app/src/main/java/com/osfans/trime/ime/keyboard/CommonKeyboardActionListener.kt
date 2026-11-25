@@ -163,6 +163,11 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
                 voiceController.cancel()
             }
 
+            /** 长按空格键触发语音：与主题 long_click 映射无关，松手由 onRelease 结束。 */
+            override fun onSpaceVoice() {
+                handleLocalVoiceInput()
+            }
+
             override fun onAction(action: KeyAction) {
                 val text = action.getText(KeyboardWindow.currentKeyboard)
                 val shouldHandle = when {

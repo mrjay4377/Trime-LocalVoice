@@ -19,6 +19,15 @@ object LocalVoiceSettings {
         prefs(context).edit().putBoolean("enabled", value).apply()
 
     /**
+     * 长按空格触发语音（默认开）：与主题无关，键盘直接拦截空格长按并转为语音键。
+     * 短按空格仍照常上屏，不影响打字；关闭后退回各主题自身的 long_click 映射。
+     */
+    fun isSpaceVoiceOn(context: Context): Boolean = prefs(context).getBoolean("space_voice", true)
+
+    fun setSpaceVoiceOn(context: Context, value: Boolean) =
+        prefs(context).edit().putBoolean("space_voice", value).apply()
+
+    /**
      * 模型存放位置：true = 优先放在使用者资料夹（需「所有文件访问权限」，native 才能 fopen 读取）；
      * false = 强制应用私有目录。默认开，满足条件时自动生效，未授权或未选资料夹时自动回退私有目录。
      */

@@ -140,6 +140,20 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
             )
 
             addPreference(
+                SwitchPreferenceCompat(ctx).apply {
+                    key = KEY_SPACE_VOICE
+                    title = "长按空格语音"
+                    summary = "开启后长按空格键即可按住说话、松手识别；短按空格照常输入，不依赖主题设置"
+                    isIconSpaceReserved = false
+                    isChecked = LocalVoiceSettings.isSpaceVoiceOn(ctx)
+                    setOnPreferenceChangeListener { _, newValue ->
+                        LocalVoiceSettings.setSpaceVoiceOn(ctx, newValue as Boolean)
+                        true
+                    }
+                },
+            )
+
+            addPreference(
                 Preference(ctx).apply {
                     key = KEY_PERMISSION
                     title = getString(R.string.local_asr_permission)
@@ -1809,6 +1823,7 @@ class LocalAsrSettingsFragment : PaddingPreferenceFragment() {
     private companion object {
         const val REQUEST_MIC = 1001
         const val KEY_ENABLED = "lv_enabled"
+        const val KEY_SPACE_VOICE = "lv_space_voice"
         const val KEY_VENDOR = "lv_vendor"
         const val KEY_PERMISSION = "lv_permission"
         const val KEY_CATEGORY_BASIC = "lv_category_basic"

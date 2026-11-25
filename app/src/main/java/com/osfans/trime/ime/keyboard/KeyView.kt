@@ -19,6 +19,7 @@ import com.mikepenz.iconics.utils.sizeDp
 import com.osfans.trime.data.theme.Theme
 import com.osfans.trime.ime.core.TrimeInputMethodService
 import com.osfans.trime.ime.popup.PopupAction
+import com.osfans.trime.ime.voice.LocalVoiceSettings
 import com.osfans.trime.ime.popup.PopupDelegate
 import com.osfans.trime.util.sp
 import splitties.dimensions.dp
@@ -157,7 +158,16 @@ class KeyView(
         }
 
         onLongClick = {
-            if (key.popup.isNotEmpty()) {
+            // 长按空格语音：设置开启且本地语音可用时，直接转为语音键，不依赖主题的 long_click 映射。
+            // 短按仍走 CLICK 上屏空格；松手由 onRelease 统一结束录音并识别。
+            val spaceVoice = key.getCode(KeyBehavior.CLICK) == KeyEvent.KEYCODE_SPACE &&
+                LocalVoiceSettings.isSpaceVoiceOn(context) &&
+                LocalVoiceSettings.isEnabled(context)
+            if (spaceVoice) {
+                keyboardActionListener.onSpaceVoice()
+                setPressedState(false)
+                dismissPopupPreview()
+            } else if (key.popup.isNotEmpty()) {
                 dismissPopupPreview()
                 showPopupKeyboard()
             } else if (hasLongPress) {

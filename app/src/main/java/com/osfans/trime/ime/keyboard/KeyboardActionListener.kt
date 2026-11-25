@@ -25,6 +25,9 @@ interface KeyboardActionListener {
     /** Called when the touch sequence is cancelled (finger slid away, system interrupt). */
     fun onCancel() {}
 
+    /** 长按空格触发语音（设置项「长按空格语音」开启时由 KeyView 调用）。 */
+    fun onSpaceVoice() {}
+
     fun onAction(action: KeyAction)
 
     /**
