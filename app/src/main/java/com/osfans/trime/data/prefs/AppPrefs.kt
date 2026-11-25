@@ -131,6 +131,8 @@ class AppPrefs(
             const val HIDE_KEY_SYMBOL = "hide_key_symbol"
             const val HIDE_KEY_HINT = "hide_key_hint"
 
+            const val FLOATING_KEYBOARD_ALPHA = "floating_keyboard_alpha"
+
             const val SOUND_ON_KEYPRESS = "sound_on_keypress"
             const val KEY_SOUND_VOLUME = "sound_volume"
             const val USE_CUSTOM_SOUND_EFFECT = "custom_sound_effect_enabled"
@@ -179,6 +181,15 @@ class AppPrefs(
             100,
             0,
             200,
+            "%",
+        )
+
+        val floatingKeyboardAlpha = int(
+            R.string.floating_keyboard_alpha,
+            FLOATING_KEYBOARD_ALPHA,
+            100,
+            10,
+            100,
             "%",
         )
 

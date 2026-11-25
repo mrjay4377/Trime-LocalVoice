@@ -139,6 +139,9 @@ class InputBarDelegate(override val di: DI) :
      */
     fun floatingDragHandle(): View? = alwaysUi.dragHandleView
 
+    /** 卡片缩放时对四向把手做反向缩放，保持把手视觉尺寸恒定。 */
+    fun setFloatingHandleInverseScale(scale: Float) = alwaysUi.setFloatingHandleInverseScale(scale)
+
     private val alwaysUi: AlwaysUi by lazy {
         AlwaysUi(context, scope) { action ->
             // A touch that started on the toolbar can finish after candidates replace it.

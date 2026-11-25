@@ -7,6 +7,7 @@ package com.osfans.trime.ime.keyboard
 
 import android.content.Context
 import android.view.MotionEvent
+import com.osfans.trime.util.isLandscape
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -35,6 +36,12 @@ object KeyboardLayoutState {
     private const val KEY_FLOAT_Y = "float_y"
     private const val KEY_FLOAT_WIDTH = "float_width_percent"
     private const val KEY_FLOAT_HEIGHT = "float_height_percent"
+    // 横竖屏各自记忆悬浮缩放与位置（对齐大海版）：竖屏沿用上面的旧 key 以兼容存量为 0 的用户，
+    // 横屏用带 _land 后缀的独立 key；首次进入横屏读旧值作为初值，之后独立保存，互不干扰。
+    private const val KEY_FLOAT_X_LAND = "float_x_land"
+    private const val KEY_FLOAT_Y_LAND = "float_y_land"
+    private const val KEY_FLOAT_WIDTH_LAND = "float_width_percent_land"
+    private const val KEY_FLOAT_HEIGHT_LAND = "float_height_percent_land"
     private const val KEY_ONE_HAND_WIDTH = "one_hand_width_percent"
 
     /** 悬浮键盘缩放范围，与咩版设置滑块一致。 */
@@ -96,10 +103,32 @@ object KeyboardLayoutState {
         dispatchLayoutChange()
     }
 
-    /** 悬浮键盘的位移，单位 px；屏幕尺寸变化后由 InputView 自行夹取到可见范围。 */
+    /** 横屏用带 _land 后缀的独立 key，竖屏用原始 key。 */
+    private fun offsetKeys(context: Context) =
+        if (context.resources.configuration.isLandscape()) {
+            KEY_FLOAT_X_LAND to KEY_FLOAT_Y_LAND
+        } else {
+            KEY_FLOAT_X to KEY_FLOAT_Y
+        }
+
+    private fun sizeKeys(context: Context) =
+        if (context.resources.configuration.isLandscape()) {
+            KEY_FLOAT_WIDTH_LAND to KEY_FLOAT_HEIGHT_LAND
+        } else {
+            KEY_FLOAT_WIDTH to KEY_FLOAT_HEIGHT
+        }
+
+    /**
+     * 悬浮键盘的位移，单位 px；屏幕尺寸变化后由 InputView 自行夹取到可见范围。
+     * 横竖屏各自独立；横屏尚未单独保存过时回退竖屏值作为初值。
+     */
     fun floatOffset(context: Context): Pair<Int, Int> {
         val p = prefs(context)
-        return p.getInt(KEY_FLOAT_X, 0) to p.getInt(KEY_FLOAT_Y, 0)
+        val (kx, ky) = offsetKeys(context)
+        if (kx == KEY_FLOAT_X_LAND && !p.contains(kx) && !p.contains(ky)) {
+            return p.getInt(KEY_FLOAT_X, 0) to p.getInt(KEY_FLOAT_Y, 0)
+        }
+        return p.getInt(kx, 0) to p.getInt(ky, 0)
     }
 
     fun setFloatOffset(
@@ -107,22 +136,35 @@ object KeyboardLayoutState {
         x: Int,
         y: Int,
     ) {
-        prefs(context).edit().putInt(KEY_FLOAT_X, x).putInt(KEY_FLOAT_Y, y).apply()
+        val (kx, ky) = offsetKeys(context)
+        prefs(context).edit().putInt(kx, x).putInt(ky, y).apply()
     }
 
-    /** 整块键盘的缩放档位（40–100），宽高共用一个值以保持等比、内容不变形。 */
-    fun floatingSize(context: Context): Int =
-        prefs(context).getInt(KEY_FLOAT_WIDTH, DEFAULT_SIZE_PERCENT)
-            .coerceIn(MIN_SIZE_PERCENT, MAX_SIZE_PERCENT)
+    /**
+     * 整块键盘的缩放档位（40–100），宽高共用一个值以保持等比、内容不变形。
+     * 横竖屏各自独立；横屏尚未单独保存过时回退竖屏值作为初值。
+     */
+    fun floatingSize(context: Context): Int {
+        val p = prefs(context)
+        val (kw, _) = sizeKeys(context)
+        val stored =
+            if (kw == KEY_FLOAT_WIDTH_LAND && !p.contains(kw)) {
+                p.getInt(KEY_FLOAT_WIDTH, DEFAULT_SIZE_PERCENT)
+            } else {
+                p.getInt(kw, DEFAULT_SIZE_PERCENT)
+            }
+        return stored.coerceIn(MIN_SIZE_PERCENT, MAX_SIZE_PERCENT)
+    }
 
     fun setFloatingSize(
         context: Context,
         percent: Int,
     ) {
         val value = percent.coerceIn(MIN_SIZE_PERCENT, MAX_SIZE_PERCENT)
+        val (kw, kh) = sizeKeys(context)
         prefs(context).edit()
-            .putInt(KEY_FLOAT_WIDTH, value)
-            .putInt(KEY_FLOAT_HEIGHT, value)
+            .putInt(kw, value)
+            .putInt(kh, value)
             .apply()
         dispatchLayoutChange()
     }
@@ -142,13 +184,15 @@ object KeyboardLayoutState {
         dispatchLayoutChange()
     }
 
-    /** 双击缩放角条：还原到默认尺寸与位置。 */
+    /** 双击缩放角条：把当前朝向还原到默认尺寸与位置（另一朝向不受影响）。 */
     fun resetFloating(context: Context) {
+        val (kx, ky) = offsetKeys(context)
+        val (kw, kh) = sizeKeys(context)
         prefs(context).edit()
-            .putInt(KEY_FLOAT_X, 0)
-            .putInt(KEY_FLOAT_Y, 0)
-            .putInt(KEY_FLOAT_WIDTH, DEFAULT_SIZE_PERCENT)
-            .putInt(KEY_FLOAT_HEIGHT, DEFAULT_SIZE_PERCENT)
+            .putInt(kx, 0)
+            .putInt(ky, 0)
+            .putInt(kw, DEFAULT_SIZE_PERCENT)
+            .putInt(kh, DEFAULT_SIZE_PERCENT)
             .apply()
         dispatchLayoutChange()
     }

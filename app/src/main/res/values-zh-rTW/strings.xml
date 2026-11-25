@@ -269,6 +269,7 @@
     <string name="floating_keyboard_handle">縮放鍵盤尺寸</string>
     <string name="floating_keyboard_drag_handle">按住拖動懸浮鍵盤</string>
     <string name="floating_keyboard_reset">已還原懸浮鍵盤位置與尺寸</string>
+    <string name="floating_keyboard_alpha">懸浮鍵盤透明度</string>
     <string name="keyboard_style">键盘样式</string>
     <string name="one_hand_width">單手鍵盤寬度</string>
     <string name="one_hand_width_current">當前：%1$s</string>

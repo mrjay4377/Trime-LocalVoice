@@ -104,6 +104,16 @@ class AlwaysUi(
     val dragHandleView: View?
         get() = dragButton.takeIf { isFloating() && it.visibility == View.VISIBLE }
 
+    /**
+     * 卡片整体等比缩放时，对四向把手做反向缩放，让它的视觉尺寸恒定（对齐大海版「把手不随缩放变小」）。
+     * 触摸命中用 getGlobalVisibleRect，会跟随视觉尺寸，因此点按区域也保持好按。
+     */
+    fun setFloatingHandleInverseScale(scale: Float) {
+        val inv = if (scale > 0f) 1f / scale else 1f
+        dragButton.scaleX = inv
+        dragButton.scaleY = inv
+    }
+
     // 拖动手柄的按下基准与「是否已开始拖动」，用来避免点按时卡片轻微漂移。
     private var dragHandleDownRawX = 0f
     private var dragHandleDownRawY = 0f

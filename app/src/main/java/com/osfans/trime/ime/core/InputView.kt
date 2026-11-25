@@ -6,6 +6,7 @@
 package com.osfans.trime.ime.core
 
 import android.annotation.SuppressLint
+import android.content.SharedPreferences
 import android.graphics.Outline
 import android.graphics.Rect
 import android.graphics.Region
@@ -27,6 +28,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.updateLayoutParams
 import androidx.lifecycle.lifecycleScope
+import androidx.preference.PreferenceManager
 import com.osfans.trime.R
 import com.osfans.trime.core.CompositionProto
 import com.osfans.trime.core.RimeMessage
@@ -123,6 +125,12 @@ class InputView(
         applyKeyboardLayoutMode()
         service.applyFloatingWindowMode()
     }
+
+    /** 悬浮透明度在设置页改动后即时生效（无需重排键盘，避免闪一下）。 */
+    private val alphaPrefListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == AppPrefs.Keyboard.FLOATING_KEYBOARD_ALPHA) applyFloatingAlpha()
+        }
 
     /** 单手卡片的物理宽度上下限与外侧安全边距（dp），避免按键被压得过窄或贴边误触。 */
     private companion object {
@@ -228,6 +236,25 @@ class InputView(
         keyboardBackground.imageDrawable = themedKeyboardBackground()
     }
 
+    /**
+     * 悬浮卡片透明度（10–100）：作用于整块键盘与编码栏，让下层内容透出来；
+     * 缩放角条保持不透明，缩到最小也能看清、点中（对齐大海版把手不变小）。
+     * 只在悬浮 / 单手卡片模式生效，普通键盘恒为 100%。
+     */
+    private fun applyFloatingAlpha() {
+        val mode = KeyboardLayoutState.mode()
+        val card = mode == KeyboardLayoutMode.FLOATING || mode.isOneHand
+        val alpha =
+            if (card) {
+                AppPrefs.defaultInstance().keyboard.floatingKeyboardAlpha.getValue()
+                    .coerceIn(10, 100) / 100f
+            } else {
+                1f
+            }
+        keyboardView.alpha = alpha
+        preedit.ui.root.alpha = alpha
+    }
+
     private var dragStartRawX = 0f
     private var dragStartRawY = 0f
     private var dragStartTranslationX = 0f
@@ -270,6 +297,7 @@ class InputView(
             )
         keyboardView.scaleX = percent / 100f
         keyboardView.scaleY = percent / 100f
+        inputBar.setFloatingHandleInverseScale(keyboardView.scaleX)
         syncHandlePlacement()
         syncFloatingPreeditPosition()
     }
@@ -547,6 +575,8 @@ class InputView(
 
         KeyboardLayoutState.onFloatingDrag = ::handleFloatingDrag
         KeyboardLayoutState.addLayoutListener(layoutListener)
+        PreferenceManager.getDefaultSharedPreferences(context)
+            .registerOnSharedPreferenceChangeListener(alphaPrefListener)
         applyKeyboardLayoutMode()
         // 上次退出时可能停在悬浮模式，重建输入视图后要立刻同步窗口底色与可触摸区域。
         service.applyFloatingWindowMode()
@@ -625,10 +655,12 @@ class InputView(
             val scale = percent / 100f
             keyboardView.scaleX = scale
             keyboardView.scaleY = scale
+            inputBar.setFloatingHandleInverseScale(scale)
         } else {
             resizeAccumPercent = 100f
             keyboardView.scaleX = 1f
             keyboardView.scaleY = 1f
+            inputBar.setFloatingHandleInverseScale(1f)
         }
 
         if (card) {
@@ -688,6 +720,7 @@ class InputView(
             // 单手卡片靠边时把编码栏贴到卡片左上角；普通模式归零（函数内部按模式判断）。
             syncFloatingPreeditPosition()
         }
+        applyFloatingAlpha()
         keyboardView.requestLayout()
         if (card && !floating) {
             // 单手改的是布局宽度，keyboardView.left 要等重新 measure 之后才准确，
@@ -947,6 +980,8 @@ class InputView(
         // implies that InputView should not be attached again after detached.
         updateWindowViewHeightJob.cancel()
         KeyboardLayoutState.removeLayoutListener(layoutListener)
+        PreferenceManager.getDefaultSharedPreferences(context)
+            .unregisterOnSharedPreferenceChangeListener(alphaPrefListener)
         popup.root.removeAllViews()
         broadcaster.clear()
         super.onDetachedFromWindow()

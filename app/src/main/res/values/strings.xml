@@ -324,6 +324,7 @@
     <string name="floating_keyboard_handle">缩放键盘尺寸</string>
     <string name="floating_keyboard_drag_handle">按住拖动悬浮键盘</string>
     <string name="floating_keyboard_reset">已还原悬浮键盘位置与尺寸</string>
+    <string name="floating_keyboard_alpha">悬浮键盘透明度</string>
     <string name="keyboard_style">键盘样式</string>
     <string name="one_hand_width">单手键盘宽度</string>
     <string name="one_hand_width_current">当前：%1$s</string>
