@@ -1,10 +1,10 @@
 /*
  * 离线手写识别引擎：StrokeTransformer（ochwpro，MIT）+ 纯 DP 叠写切分。
  *
- * 推理走 ONNX Runtime Java API（本模块 libs/onnxruntime-1.29.0-classes.jar），
- * native 层同样是官方 1.29.0 完整构建的 libort1290.so + libonnxruntime4j_jni.so。
- * app 侧 sherpa AAR 自带的 1.28.2 精简 so 不冲突，因为 core 已改名不同 SONAME，
- * JNI 桥按 DT_NEEDED 各自绑定，互不介入。
+ * 推理走 ONNX Runtime Java API（本模块 libs/onnxruntime-1.28.0-classes.jar）。
+ * native core 复用 app 侧提供的官方 1.28.0 完整版 libonnxruntime.so（含全部算子，
+ * C API VERS_1.28.0），本模块只带同版本官方 JNI 桥。
+ * APK 内只有一份 ORT core，省去约 30MB。
  *
  * 叠写（同一区域连续写多个字）不训练第二个模型：枚举所有笔画分组，
  * 每组用单字模型打分，再用 DP 找置信度之和最高的切分路径，
@@ -51,16 +51,15 @@ class OnnxInkRecognizer(
      * 不匹配时抛 UnsatisfiedLinkError。原来这一行不在 try/catch 里，构造直接抛异常
      * 被外层吞掉，界面只显示一句「模型加载失败」，看不到真正原因。
      *
-     * 先显式加载改名后的官方 1.29.0 core（SONAME=libort1290.so），再让 JNI 桥按
-     * DT_NEEDED 复用它。这样即使 APK 里漏了该文件，也会在这里抛出可见的
-     * UnsatisfiedLinkError，而不是等到 native 层莫名崩溃。
-     * app 侧 sherpa 的 1.28.2 core 叫 libonnxruntime.so，两者 SONAME 不同、互不介入。
+     * 先显式加载 app 侧提供的官方 ORT 1.28.0 完整 core（libonnxruntime.so，VERS_1.28.0），
+     * 再让 JNI 桥按 DT_NEEDED 复用它。这样即使 APK 里漏了该文件，也会在这里抛出
+     * 可见的 UnsatisfiedLinkError，而不是等到 native 层莫名崩溃。
      *
      * stage 回调把每一步落盘，native 崩溃时 Java 兜底无效，但下次打开面板能读到死在哪一步。
      */
     private val envResult: Result<OrtEnvironment> = runCatching {
-        stage("加载libort1290")
-        System.loadLibrary("ort1290")
+        stage("加载libonnxruntime")
+        System.loadLibrary("onnxruntime")
         stage("建OrtEnvironment")
         OrtEnvironment.getEnvironment().also { stage("OrtEnvironment完成") }
     }

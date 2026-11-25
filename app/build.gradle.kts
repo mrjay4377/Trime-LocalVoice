@@ -155,13 +155,13 @@ ksp {
 dependencies {
     ksp(project(":codegen"))
     // 本地语音输入（Qwen3-ASR 等）：sherpa-onnx 本地推理引擎（Apache-2.0，来自 BiBi-Keyboard）。
-    // 用原版 AAR：它自带 libonnxruntime.so（ORT 1.28.2），因为 libsherpa-onnx-jni.so 的
-    // 未定义符号是带 GNU 版本号的 OrtGetApiBase@VERS_1.28.2，只能由这份 core 满足。
-    // 手写的 ORT Java 桥需要 VERS_1.28.0，改名为 libort1280.so 后与本 so 用不同 SONAME 共存，
-    // 各自按符号版本绑定，互不介入。去 core 的 -noort.aar 保留在 libs 供回退，不再使用。
+    // sherpa-onnx AAR：已替换其中 arm64 的 libonnxruntime.so 为官方 ORT 1.28.0 完整版
+    // （原精简 core 缺算子，导致共用时手写推理返回空候选），libsherpa-onnx-jni.so 的
+    // 版本需求同步 patch 为 VERS_1.28.0 以匹配新 core。手写模块共用这份 core，
+    // APK 内只保留一份 ORT core，省去约 30MB。去 core 的 -noort.aar 保留供回退。
     implementation(files("libs/sherpa-onnx-2.0.1.aar"))
-    // 独立手写模块：自带官方 ORT 1.29.0 完整构建（Java API + core so + JNI 桥，三者同版本），
-    // core 与 JNI 桥的 SONAME / DT_NEEDED 已改为 libort1290.so，与 sherpa 的 1.28.2 隔离。
+    // 独立手写模块：官方 ORT 1.28.0 的 classes.jar + 原生 JNI 桥，
+    // native core 复用 app 侧 AAR 内的官方完整版 libonnxruntime.so，不再自带第二份 core。
     implementation(project(":handwriting"))
     // 离线翻译 Foxlet Translate 0.5.0（Bergamot / Marian + Mozilla 模型，MIT / MPL-2.0）。
     // AAR 声明 minSdk 28，而本分支 minSdk 21，故只取 classes.jar 与 arm64 native 库，

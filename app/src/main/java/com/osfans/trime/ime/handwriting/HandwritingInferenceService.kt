@@ -5,8 +5,8 @@
  * 发过来、拿回候选。这样即使 ORT 在设备 ARM 上 native abort，死的也只是这个子进程，
  * 键盘 IME 永远活着。
  *
- * 子进程里只有手写 ORT（libort1290.so），没有 sherpa 的 libonnxruntime.so，
- * 因此也顺带消除了「双 ORT 共存」的任何潜在符号冲突。
+ * 手写与语音现在共用 app 侧唯一的官方 1.28.0 完整 libonnxruntime.so（VERS_1.28.0），
+ * APK 内不再有第二份 ORT，从根源上消除了「双 ORT 共存」的符号冲突。
  */
 package com.osfans.trime.ime.handwriting
 
